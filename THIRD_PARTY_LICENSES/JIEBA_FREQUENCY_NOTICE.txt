@@ -1,0 +1,5 @@
+Jieba Chinese word segmentation project
+Source: https://github.com/fxsjy/jieba
+License: MIT
+This project uses a derived subset of Jieba's word-frequency dictionary
+only as a local candidate-ranking signal for the T9 decoder.

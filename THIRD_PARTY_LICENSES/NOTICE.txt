@@ -1,0 +1,14 @@
+JingweiAIKeyboard V0.2.1 local pinyin lexicon
+
+The bundled app/src/main/assets/pinyin_lexicon.tsv is generated from:
+1. Rime luna_pinyin dictionary:
+   https://github.com/rime/rime-luna-pinyin
+2. Rime simplified essay vocabulary:
+   https://github.com/rime/rime-essay-simp
+
+Both upstream repositories provide their license terms in their LICENSE files.
+Copies of the relevant license text are included in this directory.
+
+This V0.2.1 uses the Rime lexicon data only; it does not yet embed the native
+librime engine. Pinyin access is wrapped behind PinyinEngine.java so native
+librime can replace the local lookup backend in a later version.
