@@ -1,0 +1,89 @@
+name: V0.8 Auto Patch
+
+on:
+  push:
+    branches:
+      - dev/v0.8-input-fixes
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !startsWith(github.event.head_commit.message, 'fix(v0.8):') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev/v0.8-input-fixes
+          fetch-depth: 0
+
+      - name: Patch haptics and T9 UX
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          service = Path('app/src/main/java/com/jingwei/aikeyboard/JingweiImeService.java')
+          s = service.read_text(encoding='utf-8')
+
+          if 'import android.os.VibrationEffect;' not in s:
+              s = s.replace('import android.os.Looper;\n', 'import android.os.Looper;\nimport android.os.VibrationEffect;\nimport android.os.Vibrator;\n')
+
+          old_touch = '''        b.setHapticFeedbackEnabled(true);\n        b.setOnTouchListener((v, event) -> {\n            if (event.getAction() == MotionEvent.ACTION_DOWN) {\n                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);\n            }\n            return false;\n        });'''
+          new_touch = '''        b.setHapticFeedbackEnabled(true);\n        b.setOnTouchListener((v, event) -> {\n            if (event.getAction() == MotionEvent.ACTION_DOWN) {\n                performKeyHaptic(v);\n            }\n            return false;\n        });'''
+          s = s.replace(old_touch, new_touch)
+
+          if 'private void performKeyHaptic(View view)' not in s:
+              marker = '    private GradientDrawable rounded(int color, int radiusDp, int strokeColor) {'
+              method = '''    private void performKeyHaptic(View view) {\n        // First try Android's keyboard tap feedback.\n        try {\n            if (view != null) {\n                view.performHapticFeedback(\n                        HapticFeedbackConstants.KEYBOARD_TAP,\n                        HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING);\n            }\n        } catch (Throwable ignored) {}\n\n        // Vendor ROM fallback (ColorOS/OxygenOS etc.): a very short, low-amplitude pulse.\n        try {\n            Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);\n            if (vibrator == null || !vibrator.hasVibrator()) return;\n            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {\n                vibrator.vibrate(VibrationEffect.createOneShot(10, 55));\n            } else {\n                vibrator.vibrate(10);\n            }\n        } catch (Throwable ignored) {}\n    }\n\n'''
+              s = s.replace(marker, method + marker)
+
+          # Delete buttons replace keyButton's touch listener; add haptic there too.
+          s = s.replace('''            case MotionEvent.ACTION_DOWN:\n                deleting = true;''', '''            case MotionEvent.ACTION_DOWN:\n                performKeyHaptic(null);\n                deleting = true;''')
+
+          service.write_text(s, encoding='utf-8')
+
+          engine = Path('app/src/main/java/com/jingwei/aikeyboard/PinyinEngine.java')
+          p = engine.read_text(encoding='utf-8')
+
+          # Prefer human-friendly pinyin display for common T9 phrases.
+          p = p.replace('''    public String displayT9(String digits) {\n        String d = cleanT9(digits);\n        if (d.isEmpty()) return \"\";\n\n        List<T9State> states = decodeT9States(d, 1);''', '''    public String displayT9(String digits) {\n        String d = cleanT9(digits);\n        if (d.isEmpty()) return \"\";\n\n        String commonDisplay = commonT9Display(d);\n        if (!commonDisplay.isEmpty()) return commonDisplay;\n\n        List<T9State> states = decodeT9States(d, 1);''')
+
+          if 'private String commonT9Display(String digits)' not in p:
+              marker = '    private List<String> commonT9PhraseBoost(String digits, int limit) {'
+              method = '''    private String commonT9Display(String digits) {\n        switch (digits) {\n            case \"64\": return \"ni\";\n            case \"64426\": return \"ni hao\";\n            case \"6442692\": return \"ni hao ya\";\n            case \"6442662\": return \"ni hao ma\";\n            case \"42633\": return \"hao de\";\n            case \"5394\": return \"ke yi\";\n            case \"943943\": return \"xie xie\";\n            case \"9694432653\": return \"wo zhi dao le\";\n            default: return \"\";\n        }\n    }\n\n'''
+              p = p.replace(marker, method + marker)
+
+          # Broaden phrase boost with common everyday phrases.
+          old = '''        } else if (\"9694432653\".equals(digits)) {\n            out.add(\"我知道了\");\n        }'''
+          new = '''        } else if (\"9694432653\".equals(digits)) {\n            out.add(\"我知道了\");\n        } else if (\"9694\".equals(digits)) {\n            out.add(\"我是\");\n        } else if (\"9464\".equals(digits)) {\n            out.add(\"行\");\n        } else if (\"8254\".equals(digits)) {\n            out.add(\"太厉害\");\n        } else if (\"2634\".equals(digits)) {\n            out.add(\"没事\");\n        }'''
+          p = p.replace(old, new)
+
+          engine.write_text(p, encoding='utf-8')
+          PY
+
+      - name: Add vibrate permission if needed
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          m = Path('app/src/main/AndroidManifest.xml')
+          s = m.read_text(encoding='utf-8')
+          if 'android.permission.VIBRATE' not in s:
+              s = s.replace('<uses-permission android:name="android.permission.RECORD_AUDIO" />', '<uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.VIBRATE" />')
+          m.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No patch needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/com/jingwei/aikeyboard/JingweiImeService.java app/src/main/java/com/jingwei/aikeyboard/PinyinEngine.java app/src/main/AndroidManifest.xml
+          git commit -m 'fix(v0.8): stronger haptics and smoother T9 phrases'
+          git push origin HEAD:dev/v0.8-input-fixes

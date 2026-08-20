@@ -16,10 +16,13 @@ import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Build;
 import android.os.Looper;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.KeyEvent;
+import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.Window;
@@ -51,7 +54,8 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;import android.widget.Space;import android.widget.Spac
+import java.util.concurrent.Executors;
+import android.widget.Space;
 
 public class JingweiImeService extends InputMethodService {
 
@@ -125,22 +129,22 @@ public class JingweiImeService extends InputMethodService {
         top.setPadding(dp(2), dp(1), dp(2), dp(1));
         top.setBackground(rounded(0xFFF1F3F8, 12, 0));
 
-        Button replyBtn = compactToolButton("💬 帮我回复");
+        Button replyBtn = compactToolButton("帮我回复");
         replyBtn.setTextColor(0xFF6547F5);
         replyBtn.setOnClickListener(v -> {
             currentMode = "reply";
             ensureAiPanelOpen();
             generate();
         });
-        top.addView(replyBtn, compactWeightParams(1.45f));
+        top.addView(replyBtn, compactWeightParams(1.25f));
 
-        Button expressBtn = compactToolButton("✍ 帮我表达");
+        Button expressBtn = compactToolButton("帮我表达");
         expressBtn.setOnClickListener(v -> {
             currentMode = "moments";
             ensureAiPanelOpen();
             generate();
         });
-        top.addView(expressBtn, compactWeightParams(1.45f));
+        top.addView(expressBtn, compactWeightParams(1.25f));
 
         Button polishBtn = compactToolButton("润色");
         polishBtn.setOnClickListener(v -> {
@@ -164,19 +168,19 @@ public class JingweiImeService extends InputMethodService {
         Button keyboardSwitch = compactToolButton("⌨");
         keyboardSwitch.setContentDescription("切换输入方式");
         keyboardSwitch.setOnClickListener(v -> showKeyboardChooser());
-        top.addView(keyboardSwitch, new LinearLayout.LayoutParams(dp(42), dp(38)));
+        top.addView(keyboardSwitch, new LinearLayout.LayoutParams(dp(36), dp(38)));
 
         // 独立 AI 面板开关：只控制中间 AI 区域。
         aiPanelToggleButton = compactToolButton("⌄");
         aiPanelToggleButton.setContentDescription("展开AI面板");
         aiPanelToggleButton.setOnClickListener(v -> toggleAiPanel());
-        top.addView(aiPanelToggleButton, new LinearLayout.LayoutParams(dp(42), dp(38)));
+        top.addView(aiPanelToggleButton, new LinearLayout.LayoutParams(dp(34), dp(38)));
 
         // 整个输入法收起：与 AI 面板开关彻底分开。
         Button hideIme = compactToolButton("﹀");
         hideIme.setContentDescription("收起整个键盘");
         hideIme.setOnClickListener(v -> hideKeyboardNow());
-        top.addView(hideIme, new LinearLayout.LayoutParams(dp(38), dp(38)));
+        top.addView(hideIme, new LinearLayout.LayoutParams(dp(34), dp(38)));
 
         root.addView(top, fullMargins(0,0,0,3));
 
@@ -205,6 +209,25 @@ public class JingweiImeService extends InputMethodService {
                 new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
 
         root.addView(aiPanel, fullMargins(0,0,0,3));
+
+        // 拼音组合行：让正在输入的拼音和候选区连成一个整体。
+        composingRow = new LinearLayout(this);
+        composingRow.setOrientation(LinearLayout.HORIZONTAL);
+        composingRow.setGravity(Gravity.CENTER_VERTICAL);
+        composingRow.setVisibility(View.GONE);
+        composingRow.setPadding(dp(10), 0, dp(4), 0);
+        composingRow.setBackground(rounded(0xFFFFFFFF, 11, 0xFFE2E5EB));
+
+        composingText = label("", 13, false);
+        composingText.setTextColor(0xFF6A6E76);
+        composingText.setSingleLine(true);
+        composingRow.addView(composingText, new LinearLayout.LayoutParams(0, dp(28), 1f));
+
+        composingSplitButton = compactToolButton("分词");
+        composingSplitButton.setTextSize(11);
+        composingSplitButton.setOnClickListener(v -> handlePinyinSeparator());
+        composingRow.addView(composingSplitButton, new LinearLayout.LayoutParams(dp(48), dp(28)));
+        root.addView(composingRow, fullMargins(0,0,0,1));
 
         // 候选词条：白色整条，减少割裂感。
         LinearLayout candidateStrip = new LinearLayout(this);
@@ -781,7 +804,36 @@ public class JingweiImeService extends InputMethodService {
         g.setStroke(dp(1), function ? 0xFFC6CBD3 : 0xFFDDE1E6);
         b.setBackground(g);
         b.setElevation(dp(1));
+        b.setHapticFeedbackEnabled(true);
+        b.setOnTouchListener((v, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                performKeyHaptic(v);
+            }
+            return false;
+        });
         return b;
+    }
+
+    private void performKeyHaptic(View view) {
+        // First try Android's keyboard tap feedback.
+        try {
+            if (view != null) {
+                view.performHapticFeedback(
+                        HapticFeedbackConstants.KEYBOARD_TAP,
+                        HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING);
+            }
+        } catch (Throwable ignored) {}
+
+        // Vendor ROM fallback (ColorOS/OxygenOS etc.): a very short, low-amplitude pulse.
+        try {
+            Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+            if (vibrator == null || !vibrator.hasVibrator()) return;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createOneShot(10, 55));
+            } else {
+                vibrator.vibrate(10);
+            }
+        } catch (Throwable ignored) {}
     }
 
     private GradientDrawable rounded(int color, int radiusDp, int strokeColor) {
@@ -795,11 +847,13 @@ public class JingweiImeService extends InputMethodService {
     private Button compactToolButton(String text) {
         Button b = new Button(this);
         b.setText(text);
-        b.setTextSize(13);
+        b.setTextSize(12);
         b.setTextColor(0xFF303038);
         b.setAllCaps(false);
+        b.setSingleLine(true);
         b.setMinHeight(0); b.setMinimumHeight(0);
-        b.setPadding(dp(4),0,dp(4),0);
+        b.setMinWidth(0); b.setMinimumWidth(0);
+        b.setPadding(dp(2),0,dp(2),0);
         b.setBackground(rounded(0xFFFFFFFF, 12, 0xFFE1E4EA));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40));
         lp.setMargins(dp(2),0,dp(2),0); b.setLayoutParams(lp);
@@ -1083,7 +1137,7 @@ public class JingweiImeService extends InputMethodService {
             return;
         }
 
-        if (pinyinBuffer.length() >= 32) return;
+        if (pinyinBuffer.length() >= 64) return;
         pinyinBuffer += letter;
         ic.setComposingText(pinyinBuffer, 1);
         showPinyinCandidates();
@@ -1175,6 +1229,7 @@ public class JingweiImeService extends InputMethodService {
     private boolean handleDeleteTouch(MotionEvent event) {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+                performKeyHaptic(null);
                 deleting = true;
                 main.removeCallbacks(deleteRunnable);
                 main.postDelayed(deleteRunnable, 350);
