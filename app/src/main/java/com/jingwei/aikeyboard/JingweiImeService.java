@@ -16,6 +16,8 @@ import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Build;
 import android.os.Looper;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -805,11 +807,33 @@ public class JingweiImeService extends InputMethodService {
         b.setHapticFeedbackEnabled(true);
         b.setOnTouchListener((v, event) -> {
             if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+                performKeyHaptic(v);
             }
             return false;
         });
         return b;
+    }
+
+    private void performKeyHaptic(View view) {
+        // First try Android's keyboard tap feedback.
+        try {
+            if (view != null) {
+                view.performHapticFeedback(
+                        HapticFeedbackConstants.KEYBOARD_TAP,
+                        HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING);
+            }
+        } catch (Throwable ignored) {}
+
+        // Vendor ROM fallback (ColorOS/OxygenOS etc.): a very short, low-amplitude pulse.
+        try {
+            Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+            if (vibrator == null || !vibrator.hasVibrator()) return;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createOneShot(10, 55));
+            } else {
+                vibrator.vibrate(10);
+            }
+        } catch (Throwable ignored) {}
     }
 
     private GradientDrawable rounded(int color, int radiusDp, int strokeColor) {
@@ -1205,6 +1229,7 @@ public class JingweiImeService extends InputMethodService {
     private boolean handleDeleteTouch(MotionEvent event) {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+                performKeyHaptic(null);
                 deleting = true;
                 main.removeCallbacks(deleteRunnable);
                 main.postDelayed(deleteRunnable, 350);

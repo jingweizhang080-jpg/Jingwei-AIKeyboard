@@ -172,6 +172,9 @@ public final class PinyinEngine {
         String d = cleanT9(digits);
         if (d.isEmpty()) return "";
 
+        String commonDisplay = commonT9Display(d);
+        if (!commonDisplay.isEmpty()) return commonDisplay;
+
         List<T9State> states = decodeT9States(d, 1);
         if (!states.isEmpty()) return states.get(0).pinyin;
 
@@ -195,6 +198,20 @@ public final class PinyinEngine {
         return true; // never block long-sentence typing
     }
 
+    private String commonT9Display(String digits) {
+        switch (digits) {
+            case "64": return "ni";
+            case "64426": return "ni hao";
+            case "6442692": return "ni hao ya";
+            case "6442662": return "ni hao ma";
+            case "42633": return "hao de";
+            case "5394": return "ke yi";
+            case "943943": return "xie xie";
+            case "9694432653": return "wo zhi dao le";
+            default: return "";
+        }
+    }
+
     private List<String> commonT9PhraseBoost(String digits, int limit) {
         List<String> out = new ArrayList<>();
         if ("64426".equals(digits)) {
@@ -213,6 +230,14 @@ public final class PinyinEngine {
             out.add("谢谢");
         } else if ("9694432653".equals(digits)) {
             out.add("我知道了");
+        } else if ("9694".equals(digits)) {
+            out.add("我是");
+        } else if ("9464".equals(digits)) {
+            out.add("行");
+        } else if ("8254".equals(digits)) {
+            out.add("太厉害");
+        } else if ("2634".equals(digits)) {
+            out.add("没事");
         }
         if (out.isEmpty()) return Collections.emptyList();
         int n = Math.min(Math.max(1, limit), out.size());
