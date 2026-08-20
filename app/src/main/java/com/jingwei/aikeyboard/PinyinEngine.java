@@ -142,6 +142,9 @@ public final class PinyinEngine {
         String d = cleanT9(digits);
         if (d.isEmpty()) return Collections.emptyList();
 
+        List<String> boosted = commonT9PhraseBoost(d, limit);
+        if (!boosted.isEmpty()) return boosted;
+
         List<T9State> decoded = decodeT9States(d, Math.max(8, limit));
         if (!decoded.isEmpty()) {
             List<String> out = new ArrayList<>();
@@ -190,6 +193,30 @@ public final class PinyinEngine {
             if (key.startsWith(d)) return true;
         }
         return true; // never block long-sentence typing
+    }
+
+    private List<String> commonT9PhraseBoost(String digits, int limit) {
+        List<String> out = new ArrayList<>();
+        if ("64426".equals(digits)) {
+            out.add("你好");
+            out.add("你号");
+        } else if ("6442692".equals(digits)) {
+            out.add("你好呀");
+            out.add("你好哇");
+        } else if ("6442662".equals(digits)) {
+            out.add("你好吗");
+        } else if ("42633".equals(digits)) {
+            out.add("好的");
+        } else if ("5394".equals(digits)) {
+            out.add("可以");
+        } else if ("943943".equals(digits)) {
+            out.add("谢谢");
+        } else if ("9694432653".equals(digits)) {
+            out.add("我知道了");
+        }
+        if (out.isEmpty()) return Collections.emptyList();
+        int n = Math.min(Math.max(1, limit), out.size());
+        return new ArrayList<>(out.subList(0, n));
     }
 
     private String cleanT9(String digits) {

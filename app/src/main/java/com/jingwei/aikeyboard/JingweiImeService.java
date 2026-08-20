@@ -20,6 +20,7 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.KeyEvent;
+import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.Window;
@@ -801,6 +802,13 @@ public class JingweiImeService extends InputMethodService {
         g.setStroke(dp(1), function ? 0xFFC6CBD3 : 0xFFDDE1E6);
         b.setBackground(g);
         b.setElevation(dp(1));
+        b.setHapticFeedbackEnabled(true);
+        b.setOnTouchListener((v, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
+            }
+            return false;
+        });
         return b;
     }
 
