@@ -8,25 +8,41 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Lightweight local pinyin lookup engine.
+ * Lightweight offline pinyin/T9 engine.
  *
- * The lexicon is generated from the Rime luna_pinyin dictionary and
- * rime-essay-simp vocabulary. It runs completely offline and is intentionally
- * wrapped behind this class so a native librime backend can replace it later
- * without changing the keyboard UI.
+ * V0.8 performance goals:
+ * 1) never scan the whole T9 dictionary on every key press;
+ * 2) reuse one decode result for display + candidate rendering;
+ * 3) keep the beam small enough for continuous typing on mid-range phones;
+ * 4) use dictionary frequency for general phrases instead of hard-coding only a few examples.
+ *
+ * This remains a lightweight Java engine. A native Rime/librime backend can replace it later
+ * without changing JingweiImeService's public calls.
  */
 public final class PinyinEngine {
     private final Context context;
     private final Map<String, List<String>> lexicon = new HashMap<>();
-    private final Map<String, List<String>> t9Lexicon = new HashMap<>();
-    private final Map<String, String> t9Pinyin = new HashMap<>();
-
     private final Map<String, List<T9Token>> t9Tokens = new HashMap<>();
+
+    /** Best token for every numeric prefix, built once during load(). */
+    private final Map<String, T9Token> prefixBest = new HashMap<>();
+
+    /** Tiny LRU caches: one fast decode is shared by displayT9Safe() and searchT9(). */
+    private final Map<String, List<T9State>> t9DecodeCache = lruMap(96);
+    private final Map<String, List<String>> searchCache = lruMap(96);
+
+    private volatile boolean loaded = false;
+
+    private static final int BEAM_WIDTH = 24;
+    private static final int TOKEN_CAP = 10;
+    private static final int MAX_TOKEN_DIGITS = 18;
 
     private static final class T9Token {
         final String pinyin;
@@ -36,7 +52,7 @@ public final class PinyinEngine {
         T9Token(String pinyin, String word, int frequency) {
             this.pinyin = pinyin;
             this.word = word;
-            this.frequency = frequency;
+            this.frequency = Math.max(1, frequency);
         }
     }
 
@@ -52,7 +68,13 @@ public final class PinyinEngine {
         }
     }
 
-    private volatile boolean loaded = false;
+    private static <K, V> Map<K, V> lruMap(final int max) {
+        return Collections.synchronizedMap(new LinkedHashMap<K, V>(max, 0.75f, true) {
+            @Override protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+                return size() > max;
+            }
+        });
+    }
 
     public PinyinEngine(Context context) {
         this.context = context.getApplicationContext();
@@ -64,6 +86,7 @@ public final class PinyinEngine {
 
     public synchronized void load() throws Exception {
         if (loaded) return;
+
         try (BufferedReader br = new BufferedReader(new InputStreamReader(
                 context.getAssets().open("pinyin_lexicon.tsv"), StandardCharsets.UTF_8))) {
             String line;
@@ -71,24 +94,9 @@ public final class PinyinEngine {
                 if (line.isEmpty() || line.charAt(0) == '#') continue;
                 int tab = line.indexOf('\t');
                 if (tab <= 0 || tab >= line.length() - 1) continue;
-                String key = line.substring(0, tab);
+                String key = normalize(line.substring(0, tab));
                 String[] words = line.substring(tab + 1).split("\\|");
-                List<String> wordList = Collections.unmodifiableList(Arrays.asList(words));
-                lexicon.put(key, wordList);
-
-                String digits = toT9Digits(key);
-                if (!digits.isEmpty()) {
-                    List<String> existing = t9Lexicon.get(digits);
-                    if (existing == null) {
-                        existing = new ArrayList<>();
-                        t9Lexicon.put(digits, existing);
-                    }
-                    for (String word : words) {
-                        if (!existing.contains(word)) existing.add(word);
-                        if (existing.size() >= 20) break;
-                    }
-                    if (!t9Pinyin.containsKey(digits)) t9Pinyin.put(digits, key);
-                }
+                lexicon.put(key, Collections.unmodifiableList(Arrays.asList(words)));
             }
         }
 
@@ -99,22 +107,50 @@ public final class PinyinEngine {
                 if (line.isEmpty() || line.charAt(0) == '#') continue;
                 String[] parts = line.split("\t");
                 if (parts.length < 4) continue;
-                String digits = parts[0];
+                String digits = cleanT9(parts[0]);
+                if (digits.isEmpty()) continue;
                 String py = parts[1];
                 String word = parts[2];
                 int freq = 1;
                 try { freq = Integer.parseInt(parts[3]); } catch (Throwable ignored) {}
+
+                T9Token token = new T9Token(py, word, freq);
                 List<T9Token> list = t9Tokens.get(digits);
                 if (list == null) {
                     list = new ArrayList<>();
                     t9Tokens.put(digits, list);
                 }
-                list.add(new T9Token(py, word, Math.max(1, freq)));
+                list.add(token);
+
+                // Pre-index prefixes once. This replaces the old O(dictionary-size)
+                // scan that ran repeatedly while the user was tapping quickly.
+                int prefixLimit = Math.min(digits.length(), MAX_TOKEN_DIGITS);
+                for (int i = 1; i <= prefixLimit; i++) {
+                    String prefix = digits.substring(0, i);
+                    T9Token old = prefixBest.get(prefix);
+                    if (old == null || betterPrefixToken(token, old)) {
+                        prefixBest.put(prefix, token);
+                    }
+                }
             }
+        }
+
+        // Keep high-frequency choices first so each beam expansion can inspect only TOKEN_CAP.
+        Comparator<T9Token> byFreq = (a, b) -> Integer.compare(b.frequency, a.frequency);
+        for (List<T9Token> list : t9Tokens.values()) {
+            Collections.sort(list, byFreq);
         }
 
         loaded = true;
     }
+
+    private boolean betterPrefixToken(T9Token a, T9Token b) {
+        if (a.frequency != b.frequency) return a.frequency > b.frequency;
+        if (a.word.length() != b.word.length()) return a.word.length() > b.word.length();
+        return a.pinyin.length() < b.pinyin.length();
+    }
+
+    // -------------------- 26-key --------------------
 
     public List<String> search(String rawPinyin, int limit) {
         String key = normalize(rawPinyin);
@@ -122,11 +158,9 @@ public final class PinyinEngine {
 
         List<String> exact = lexicon.get(key);
         if (exact != null && !exact.isEmpty()) {
-            int n = Math.min(Math.max(limit, 1), exact.size());
-            return new ArrayList<>(exact.subList(0, n));
+            return copyLimit(exact, limit);
         }
 
-        // 连续拼音：例如 jintianzenmeyang -> jintian + zenmeyang -> 今天怎么样
         List<String> segmented = segmentCandidates(key, limit);
         if (!segmented.isEmpty()) return segmented;
 
@@ -136,180 +170,146 @@ public final class PinyinEngine {
         return fallback(key, limit);
     }
 
+    // -------------------- 9-key / T9 --------------------
 
-    /** Frequency-ranked 9-key/T9 decoder. */
     public List<String> searchT9(String digits, int limit) {
         String d = cleanT9(digits);
         if (d.isEmpty()) return Collections.emptyList();
 
-        List<String> boosted = commonT9PhraseBoost(d, limit);
-        if (!boosted.isEmpty()) return boosted;
+        String cacheKey = d + "#" + Math.max(1, limit);
+        List<String> cached = searchCache.get(cacheKey);
+        if (cached != null) return new ArrayList<>(cached);
 
-        List<T9State> decoded = decodeT9States(d, Math.max(8, limit));
-        if (!decoded.isEmpty()) {
-            List<String> out = new ArrayList<>();
-            for (T9State state : decoded) {
-                if (!out.contains(state.text)) out.add(state.text);
-                if (out.size() >= limit) break;
-            }
-            if (!out.isEmpty()) return out;
-        }
-
-        // Incomplete trailing syllable: show prefix candidates instead of nonsense.
         List<String> out = new ArrayList<>();
-        for (Map.Entry<String, List<T9Token>> e : t9Tokens.entrySet()) {
-            if (!e.getKey().startsWith(d)) continue;
-            for (T9Token token : e.getValue()) {
-                if (!out.contains(token.word)) out.add(token.word);
-                if (out.size() >= limit) return out;
-            }
+
+        // Exact whole-token hits are cheap and often very good for words/phrases.
+        List<T9Token> direct = t9Tokens.get(d);
+        if (direct != null) {
+            int n = Math.min(direct.size(), Math.min(limit, TOKEN_CAP));
+            for (int i = 0; i < n; i++) addUnique(out, direct.get(i).word, limit);
         }
-        return out;
+
+        // General sentence decoding. No special-casing is required for every phrase.
+        for (T9State state : decodedStates(d)) {
+            addUnique(out, state.text, limit);
+            if (out.size() >= limit) break;
+        }
+
+        // If the last syllable is incomplete, O(1) prefix lookup keeps candidates responsive.
+        if (out.size() < limit) {
+            T9Token prefix = prefixBest.get(d);
+            if (prefix != null) addUnique(out, prefix.word, limit);
+        }
+
+        List<String> saved = Collections.unmodifiableList(new ArrayList<>(out));
+        searchCache.put(cacheKey, saved);
+        return new ArrayList<>(saved);
     }
 
-    /** Best pinyin spelling for the current 9-key sequence. */
     public String displayT9(String digits) {
         String d = cleanT9(digits);
         if (d.isEmpty()) return "";
 
-        String commonDisplay = commonT9Display(d);
-        if (!commonDisplay.isEmpty()) return commonDisplay;
-
-        List<T9State> states = decodeT9States(d, 1);
+        List<T9State> states = decodedStates(d);
         if (!states.isEmpty()) return states.get(0).pinyin;
 
-        // If the last syllable is unfinished, prefer the most frequent matching token.
-        T9Token best = null;
-        for (Map.Entry<String, List<T9Token>> e : t9Tokens.entrySet()) {
-            if (!e.getKey().startsWith(d) || e.getValue().isEmpty()) continue;
-            T9Token candidate = e.getValue().get(0);
-            if (best == null || candidate.frequency > best.frequency) best = candidate;
+        T9Token prefix = prefixBest.get(d);
+        return prefix == null ? "" : prefix.pinyin;
+    }
+
+    public String displayT9Safe(String digits) {
+        String d = cleanT9(digits);
+        if (d.isEmpty()) return "";
+
+        String value = displayT9(d);
+        if (!value.isEmpty()) return value;
+
+        // Prefix lookup is precomputed, so this remains cheap during rapid tapping.
+        for (int cut = d.length() - 1; cut > 0; cut--) {
+            T9Token token = prefixBest.get(d.substring(0, cut));
+            if (token != null) return token.pinyin;
         }
-        return best == null ? "" : best.pinyin;
+        return "";
     }
 
     public boolean hasT9Prefix(String digits) {
         String d = cleanT9(digits);
-        if (d.isEmpty()) return true;
-        if (!decodeT9States(d, 1).isEmpty()) return true;
-        for (String key : t9Tokens.keySet()) {
-            if (key.startsWith(d)) return true;
-        }
-        return true; // never block long-sentence typing
+        return d.isEmpty() || prefixBest.containsKey(d) || !decodedStates(d).isEmpty();
     }
 
-    private String commonT9Display(String digits) {
-        switch (digits) {
-            case "64": return "ni";
-            case "64426": return "ni hao";
-            case "6442692": return "ni hao ya";
-            case "6442662": return "ni hao ma";
-            case "42633": return "hao de";
-            case "5394": return "ke yi";
-            case "943943": return "xie xie";
-            case "9694432653": return "wo zhi dao le";
-            default: return "";
-        }
+    private List<T9State> decodedStates(String digits) {
+        List<T9State> cached = t9DecodeCache.get(digits);
+        if (cached != null) return cached;
+
+        List<T9State> decoded = decodeT9States(digits);
+        List<T9State> saved = Collections.unmodifiableList(decoded);
+        t9DecodeCache.put(digits, saved);
+        return saved;
     }
 
-    private List<String> commonT9PhraseBoost(String digits, int limit) {
-        List<String> out = new ArrayList<>();
-        if ("64426".equals(digits)) {
-            out.add("你好");
-            out.add("你号");
-        } else if ("6442692".equals(digits)) {
-            out.add("你好呀");
-            out.add("你好哇");
-        } else if ("6442662".equals(digits)) {
-            out.add("你好吗");
-        } else if ("42633".equals(digits)) {
-            out.add("好的");
-        } else if ("5394".equals(digits)) {
-            out.add("可以");
-        } else if ("943943".equals(digits)) {
-            out.add("谢谢");
-        } else if ("9694432653".equals(digits)) {
-            out.add("我知道了");
-        } else if ("9694".equals(digits)) {
-            out.add("我是");
-        } else if ("9464".equals(digits)) {
-            out.add("行");
-        } else if ("8254".equals(digits)) {
-            out.add("太厉害");
-        } else if ("2634".equals(digits)) {
-            out.add("没事");
-        }
-        if (out.isEmpty()) return Collections.emptyList();
-        int n = Math.min(Math.max(1, limit), out.size());
-        return new ArrayList<>(out.subList(0, n));
-    }
-
-    private String cleanT9(String digits) {
-        if (digits == null) return "";
-        return digits.replaceAll("[^2-9]", "");
-    }
-
-    private List<T9State> decodeT9States(String digits, int limit) {
+    private List<T9State> decodeT9States(String digits) {
         final int n = digits.length();
-        final int maxChunk = 16;
-        final int beamWidth = 90;
-        final double tokenPenalty = 18.0;
+        if (n == 0) return Collections.emptyList();
 
         Map<Integer, List<T9State>> beams = new HashMap<>();
-        List<T9State> start = new ArrayList<>();
-        start.add(new T9State(0.0, "", ""));
-        beams.put(0, start);
+        beams.put(0, new ArrayList<>(Collections.singletonList(new T9State(0.0, "", ""))));
 
         for (int pos = 0; pos < n; pos++) {
             List<T9State> current = beams.get(pos);
             if (current == null || current.isEmpty()) continue;
-            current = topStates(current, beamWidth);
+            current = topStates(current, BEAM_WIDTH);
 
-            int maxEnd = Math.min(n, pos + maxChunk);
+            int maxEnd = Math.min(n, pos + MAX_TOKEN_DIGITS);
             for (int end = pos + 1; end <= maxEnd; end++) {
-                String piece = digits.substring(pos, end);
-                List<T9Token> tokens = t9Tokens.get(piece);
+                List<T9Token> tokens = t9Tokens.get(digits.substring(pos, end));
                 if (tokens == null || tokens.isEmpty()) continue;
 
-                int tokenCap = Math.min(tokens.size(), 28);
                 List<T9State> target = beams.get(end);
                 if (target == null) {
                     target = new ArrayList<>();
                     beams.put(end, target);
                 }
 
-                for (int ti = 0; ti < tokenCap; ti++) {
+                int cap = Math.min(tokens.size(), TOKEN_CAP);
+                for (int ti = 0; ti < cap; ti++) {
                     T9Token token = tokens.get(ti);
-                    double add = Math.log(token.frequency + 1.0) - tokenPenalty - ti * 0.02;
-                    if (token.pinyin.length() == 1) add -= 2.0;
-
+                    double add = tokenScore(token, ti);
                     for (T9State state : current) {
-                        String nextText = state.text + token.word;
-                        String nextPy = state.pinyin.isEmpty()
-                                ? token.pinyin
-                                : state.pinyin + " " + token.pinyin;
-                        target.add(new T9State(state.score + add, nextText, nextPy));
+                        target.add(new T9State(
+                                state.score + add,
+                                state.text + token.word,
+                                state.pinyin.isEmpty() ? token.pinyin : state.pinyin + " " + token.pinyin));
                     }
                 }
 
-                if (target.size() > beamWidth * 4) {
-                    beams.put(end, topStates(target, beamWidth));
+                // Bound memory/CPU aggressively during long rapid input.
+                if (target.size() > BEAM_WIDTH * 3) {
+                    beams.put(end, topStates(target, BEAM_WIDTH));
                 }
             }
         }
 
         List<T9State> finals = beams.get(n);
         if (finals == null || finals.isEmpty()) return Collections.emptyList();
-        return topStates(finals, Math.max(limit * 4, limit));
+        return topStates(finals, BEAM_WIDTH);
+    }
+
+    private double tokenScore(T9Token token, int rank) {
+        // Frequency is primary. A moderate multi-character bonus helps real words/phrases
+        // beat unlikely chains of unrelated single characters without the old huge penalty.
+        double freq = Math.log(token.frequency + 1.0);
+        double lengthBonus = Math.min(4, token.word.length()) * 0.85;
+        double segmentationCost = 1.15;
+        return freq + lengthBonus - segmentationCost - rank * 0.035;
     }
 
     private List<T9State> topStates(List<T9State> input, int count) {
-        Collections.sort(input, (a, b) -> Double.compare(b.score, a.score));
+        if (input.size() > 1) {
+            Collections.sort(input, (a, b) -> Double.compare(b.score, a.score));
+        }
         List<T9State> out = new ArrayList<>();
         Map<String, Boolean> seen = new HashMap<>();
-
         for (T9State state : input) {
-            // Keep distinct Chinese outputs; equivalent segmentations are redundant.
             if (seen.containsKey(state.text)) continue;
             seen.put(state.text, true);
             out.add(state);
@@ -318,34 +318,19 @@ public final class PinyinEngine {
         return out;
     }
 
-    public String displayT9Safe(String digits) {
-        String value = displayT9(digits);
-        if (value != null && !value.isEmpty()) return value;
-
-        if (digits == null) return "";
-        String d = digits.replaceAll("[^2-9]", "");
-        if (d.isEmpty()) return "";
-
-        // Find the longest decodable prefix, then show only that pinyin.
-        // The undecoded tail stays internal, never as raw numbers.
-        for (int cut = d.length() - 1; cut > 0; cut--) {
-            String prefix = d.substring(0, cut);
-            String decoded = displayT9(prefix);
-            if (decoded != null && !decoded.isEmpty()) return decoded;
-        }
-        return "";
+    private void addUnique(List<String> out, String value, int limit) {
+        if (value == null || value.isEmpty() || out.contains(value) || out.size() >= limit) return;
+        out.add(value);
     }
 
-    private String splitPinyinForDisplay(String pinyin) {
-        // Lightweight display formatting. The lexicon already contains valid pinyin;
-        // keeping it compact avoids a separate blank composition row.
-        return pinyin == null ? "" : pinyin;
+    private String cleanT9(String digits) {
+        if (digits == null) return "";
+        return digits.replaceAll("[^2-9]", "");
     }
 
     private String toT9Digits(String pinyin) {
-        if (pinyin == null) return "";
-        StringBuilder sb = new StringBuilder();
         String v = normalize(pinyin);
+        StringBuilder sb = new StringBuilder(v.length());
         for (int i = 0; i < v.length(); i++) {
             char c = v.charAt(i);
             if ("abc".indexOf(c) >= 0) sb.append('2');
@@ -360,6 +345,8 @@ public final class PinyinEngine {
         return sb.toString();
     }
 
+    // -------------------- shared helpers --------------------
+
     private List<String> segmentCandidates(String key, int limit) {
         Map<Integer, List<String>> memo = new HashMap<>();
         return segmentFrom(key, 0, Math.max(1, limit), memo);
@@ -367,12 +354,12 @@ public final class PinyinEngine {
 
     private List<String> segmentFrom(String key, int pos, int limit, Map<Integer, List<String>> memo) {
         if (pos == key.length()) return new ArrayList<>(Collections.singletonList(""));
-        if (memo.containsKey(pos)) return memo.get(pos);
+        List<String> saved = memo.get(pos);
+        if (saved != null) return saved;
+
         List<String> out = new ArrayList<>();
-        // 优先长词，减少把完整词组拆成单字。
         for (int end = key.length(); end > pos; end--) {
-            String part = key.substring(pos, end);
-            List<String> words = lexicon.get(part);
+            List<String> words = lexicon.get(key.substring(pos, end));
             if (words == null || words.isEmpty()) continue;
             List<String> tails = segmentFrom(key, end, limit, memo);
             if (tails.isEmpty()) continue;
@@ -381,7 +368,10 @@ public final class PinyinEngine {
                 for (String tail : tails) {
                     String candidate = words.get(w) + tail;
                     if (!out.contains(candidate)) out.add(candidate);
-                    if (out.size() >= limit) { memo.put(pos, out); return out; }
+                    if (out.size() >= limit) {
+                        memo.put(pos, out);
+                        return out;
+                    }
                 }
             }
         }
@@ -398,10 +388,6 @@ public final class PinyinEngine {
                 .trim();
     }
 
-    /**
-     * Display composing pinyin in the same candidate row, Baidu-style.
-     * Explicit apostrophes are shown as spaces: ni'hao -> ni hao.
-     */
     public String formatForDisplay(String rawPinyin) {
         if (rawPinyin == null) return "";
         String value = rawPinyin.toLowerCase()
@@ -411,16 +397,6 @@ public final class PinyinEngine {
         return value.replace("'", " ").replaceAll(" +", " ");
     }
 
-    /**
-     * Lightweight abbreviated-pinyin support.
-     * Examples:
-     *   nh      -> 你好
-     *   hhhhh   -> 哈哈哈哈哈
-     *   h'h'h'h'h -> 哈哈哈哈哈
-     *
-     * This is intentionally a small, predictable layer. A native Rime/librime
-     * backend can replace it later without changing the keyboard UI.
-     */
     private List<String> initialFallback(String raw, int limit) {
         if (raw == null) return Collections.emptyList();
         String cleaned = raw.toLowerCase()
@@ -428,17 +404,10 @@ public final class PinyinEngine {
                 .replace("'", "")
                 .replace("ü", "v")
                 .trim();
-        if (cleaned.isEmpty()) return Collections.emptyList();
-
-        // Only treat consonant-only input as "简拼", so normal full pinyin
-        // such as nihao/woshi is never disturbed.
-        if (!cleaned.matches("[bcdfghjklmnpqrstvwxyz]+")) {
+        if (cleaned.isEmpty() || !cleaned.matches("[bcdfghjklmnpqrstvwxyz]+")) {
             return Collections.emptyList();
         }
 
-        List<String> out = new ArrayList<>();
-
-        // High-frequency shorthand phrases.
         Map<String, String[]> common = new HashMap<>();
         common.put("nh", new String[]{"你好", "你会", "你还"});
         common.put("wm", new String[]{"我们", "外面"});
@@ -449,15 +418,13 @@ public final class PinyinEngine {
         common.put("hhh", new String[]{"哈哈哈", "还好哈"});
         common.put("hhhh", new String[]{"哈哈哈哈", "还好还好"});
         common.put("hhhhh", new String[]{"哈哈哈哈哈", "还好还好哈"});
+
+        List<String> out = new ArrayList<>();
         String[] phrases = common.get(cleaned);
         if (phrases != null) {
-            for (String phrase : phrases) {
-                if (!out.contains(phrase)) out.add(phrase);
-                if (out.size() >= limit) return out;
-            }
+            for (String phrase : phrases) addUnique(out, phrase, limit);
         }
 
-        // Repeated single initial: hhhhh -> 哈哈哈哈哈.
         if (cleaned.length() >= 2) {
             char first = cleaned.charAt(0);
             boolean same = true;
@@ -469,13 +436,11 @@ public final class PinyinEngine {
                 if (!ch.isEmpty()) {
                     StringBuilder repeated = new StringBuilder();
                     for (int i = 0; i < cleaned.length(); i++) repeated.append(ch);
-                    String candidate = repeated.toString();
-                    if (!out.contains(candidate)) out.add(0, candidate);
+                    if (!out.contains(repeated.toString())) out.add(0, repeated.toString());
                 }
             }
         }
-
-        return out.size() <= limit ? out : new ArrayList<>(out.subList(0, limit));
+        return copyLimit(out, limit);
     }
 
     private String commonInitialChar(char c) {
@@ -504,7 +469,6 @@ public final class PinyinEngine {
         }
     }
 
-    /** Tiny safety net while the big lexicon is still loading. */
     private List<String> fallback(String key, int limit) {
         String[] words;
         switch (key) {
@@ -521,6 +485,12 @@ public final class PinyinEngine {
             case "xiexie": words = new String[]{"谢谢"}; break;
             default: return Collections.emptyList();
         }
-        return new ArrayList<>(Arrays.asList(words).subList(0, Math.min(limit, words.length)));
+        return copyLimit(Arrays.asList(words), limit);
+    }
+
+    private List<String> copyLimit(List<String> source, int limit) {
+        if (source == null || source.isEmpty()) return Collections.emptyList();
+        int n = Math.min(Math.max(1, limit), source.size());
+        return new ArrayList<>(source.subList(0, n));
     }
 }
