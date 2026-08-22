@@ -1,0 +1,41 @@
+name: V0.11 Rime Lexicon Import
+
+on:
+  push:
+    branches:
+      - dev/v0.10-input-core
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    if: ${{ !contains(github.event.head_commit.message, '[rime-lexicon]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: dev/v0.10-input-core
+          fetch-depth: 0
+
+      - name: Download Rime simplified pinyin dictionary
+        run: |
+          curl -L --fail --retry 3 \
+            https://raw.githubusercontent.com/rime/rime-pinyin-simp/master/pinyin_simp.dict.yaml \
+            -o /tmp/pinyin_simp.dict.yaml
+
+      - name: Merge frequency-ranked Rime vocabulary
+        run: python3 tools/v11_import_rime.py
+
+      - name: Commit generated lexicon
+        run: |
+          git config user.name "Jingwei AI Dev Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add app/src/main/assets/pinyin_lexicon.tsv
+          if git diff --cached --quiet; then
+            echo "Lexicon already up to date"
+            exit 0
+          fi
+          git commit -m "feat(v0.11): import real Rime simplified pinyin lexicon [rime-lexicon]"
+          git push origin HEAD:dev/v0.10-input-core
