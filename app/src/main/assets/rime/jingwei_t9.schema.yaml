@@ -1,0 +1,51 @@
+# Rime schema for Jingwei AI Keyboard 9-key pinyin
+schema:
+  schema_id: jingwei_t9
+  name: 景威九键
+  version: "0.12"
+engine:
+  processors:
+    - ascii_composer
+    - recognizer
+    - key_binder
+    - speller
+    - punctuator
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - ascii_segmentor
+    - matcher
+    - abc_segmentor
+    - punct_segmentor
+    - fallback_segmentor
+  translators:
+    - punct_translator
+    - script_translator
+  filters:
+    - uniquifier
+translator:
+  dictionary: jingwei
+  prism: jingwei_t9
+  enable_sentence: true
+  enable_completion: true
+  spelling_hints: 8
+speller:
+  alphabet: zyxwvutsrqponmlkjihgfedcba987654321
+  initials: zyxwvutsrqponmlkjihgfedcba987654321
+  delimiter: " '"
+  algebra:
+    - derive/[abc]/2/
+    - derive/[def]/3/
+    - derive/[ghi]/4/
+    - derive/[jkl]/5/
+    - derive/[mno]/6/
+    - derive/[pqrs]/7/
+    - derive/[tuv]/8/
+    - derive/[wxyz]/9/
+key_binder:
+  bindings:
+    - { when: has_menu, accept: 1, send: apostrophe }
+punctuator:
+  half_shape:
+    "1": [1, "@", ".", "/", ":", "_", "-", "#"]
