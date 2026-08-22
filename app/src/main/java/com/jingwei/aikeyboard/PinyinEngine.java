@@ -34,15 +34,16 @@ public final class PinyinEngine {
     private final Map<String, List<T9Token>> t9Exact = new HashMap<>();
     private final Map<String, T9Token> t9PrefixBest = new HashMap<>();
     private final Map<String, String> t9Syllable = new HashMap<>();
+    private final Map<String, Integer> t9SyllableScore = new HashMap<>();
 
     private final Map<String, List<String>> searchCache = lruMap(160);
     private final Map<String, List<T9State>> t9Cache = lruMap(160);
 
     private volatile boolean loaded = false;
 
-    private static final int BEAM_WIDTH = 10;
-    private static final int TOKEN_CAP = 5;
-    private static final int MAX_TOKEN_DIGITS = 12;
+    private static final int BEAM_WIDTH = 14;
+    private static final int TOKEN_CAP = 8;
+    private static final int MAX_TOKEN_DIGITS = 24;
 
     private static final class T9Token {
         final String pinyin;
@@ -92,6 +93,7 @@ public final class PinyinEngine {
         t9Exact.clear();
         t9PrefixBest.clear();
         t9Syllable.clear();
+        t9SyllableScore.clear();
         searchCache.clear();
         t9Cache.clear();
 
@@ -108,25 +110,34 @@ public final class PinyinEngine {
                 String py = normalize(line.substring(0, tab));
                 if (py.isEmpty()) continue;
 
-                String[] rawWords = line.substring(tab + 1).split("\\|");
+                int tab2 = line.indexOf('\t', tab + 1);
+                String wordsPart = tab2 < 0 ? line.substring(tab + 1) : line.substring(tab + 1, tab2);
+                String weightsPart = tab2 < 0 ? "" : line.substring(tab2 + 1);
+                String[] rawWords = wordsPart.split("\\|");
+                String[] rawWeights = weightsPart.isEmpty() ? new String[0] : weightsPart.split("\\|");
                 ArrayList<String> words = new ArrayList<>();
                 int rank = 0;
-                for (String raw : rawWords) {
-                    String word = raw.trim();
+                int bestSingleWeight = 0;
+                for (int i = 0; i < rawWords.length; i++) {
+                    String word = rawWords[i].trim();
                     if (word.isEmpty() || words.contains(word)) continue;
+                    int frequency = 1;
+                    if (i < rawWeights.length) {
+                        try { frequency = Math.max(1, Integer.parseInt(rawWeights[i].trim())); }
+                        catch (Throwable ignored) {}
+                    }
                     words.add(word);
-                    indexT9(py, word, rank++);
+                    indexT9(py, word, rank++, frequency);
+                    if (word.length() == 1) bestSingleWeight = Math.max(bestSingleWeight, frequency);
                 }
                 if (!words.isEmpty()) {
                     lexicon.put(py, Collections.unmodifiableList(words));
-                    boolean hasSingleChar = false;
-                    for (String w : words) {
-                        if (w.length() == 1) { hasSingleChar = true; break; }
-                    }
-                    if (hasSingleChar && py.length() <= 6) {
+                    if (bestSingleWeight > 0 && py.length() <= 6) {
                         String digits = toT9Digits(py);
-                        if (!digits.isEmpty() && !t9Syllable.containsKey(digits)) {
+                        Integer oldScore = t9SyllableScore.get(digits);
+                        if (!digits.isEmpty() && (oldScore == null || bestSingleWeight > oldScore)) {
                             t9Syllable.put(digits, py);
+                            t9SyllableScore.put(digits, bestSingleWeight);
                         }
                     }
                 }
@@ -136,7 +147,7 @@ public final class PinyinEngine {
         loaded = true;
     }
 
-    private void indexT9(String pinyin, String word, int rank) {
+    private void indexT9(String pinyin, String word, int rank, int frequency) {
         String digits = toT9Digits(pinyin);
         if (digits.isEmpty()) return;
 
@@ -144,7 +155,9 @@ public final class PinyinEngine {
         // The old +1000-per-token formula accidentally rewarded splitting a
         // sentence into many unrelated single characters. Longer known phrases
         // must beat fragmented paths, while single characters remain a fallback.
-        int score = Math.min(word.length(), 8) * 220 - Math.min(rank, 50) * 8;
+        int freqBonus = (int) Math.min(1100, Math.log10(Math.max(1, frequency) + 1.0) * 260.0);
+        int score = Math.min(word.length(), 8) * 300 + freqBonus - Math.min(rank, 50) * 6;
+        if (word.length() == 1) score -= 180;
         T9Token token = new T9Token(pinyin, word, score);
 
         List<T9Token> list = t9Exact.get(digits);
