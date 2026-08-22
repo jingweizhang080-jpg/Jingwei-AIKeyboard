@@ -10,8 +10,8 @@ android {
         applicationId "com.jingwei.aikeyboard"
         minSdk 26
         targetSdk 35
-        versionCode 26
-        versionName "0.9.0-preview1"
+        versionCode 27
+        versionName "0.10.0-preview1"
     }
 
     buildTypes {
