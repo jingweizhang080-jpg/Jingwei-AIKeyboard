@@ -1,0 +1,11 @@
+# Jingwei AI Keyboard Rime bootstrap configuration
+config_version: "0.12"
+schema_list:
+  - schema: jingwei_pinyin
+  - schema: jingwei_t9
+switcher:
+  caption: "方案"
+  hotkeys:
+    - Control+grave
+menu:
+  page_size: 10
