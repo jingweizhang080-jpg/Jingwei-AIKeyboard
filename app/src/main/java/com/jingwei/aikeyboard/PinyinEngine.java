@@ -140,10 +140,11 @@ public final class PinyinEngine {
         String digits = toT9Digits(pinyin);
         if (digits.isEmpty()) return;
 
-        // Earlier words in a lexicon row are treated as more common.
-        // Multi-character words/phrases get a modest bonus so normal phrases
-        // beat improbable chains of unrelated single characters.
-        int score = 1000 - Math.min(rank, 50) * 12 + Math.min(word.length(), 6) * 45;
+        // V0.10 ranking: score by covered Chinese characters, not by token count.
+        // The old +1000-per-token formula accidentally rewarded splitting a
+        // sentence into many unrelated single characters. Longer known phrases
+        // must beat fragmented paths, while single characters remain a fallback.
+        int score = Math.min(word.length(), 8) * 220 - Math.min(rank, 50) * 8;
         T9Token token = new T9Token(pinyin, word, score);
 
         List<T9Token> list = t9Exact.get(digits);
@@ -349,7 +350,7 @@ public final class PinyinEngine {
 
                 for (T9State state : current) {
                     for (T9Token token : bestTokens) {
-                        int score = state.score + token.score - 80;
+                        int score = state.score + token.score - 120;
                         target.add(new T9State(
                                 score,
                                 state.text + token.word,
