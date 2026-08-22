@@ -1,0 +1,36 @@
+# Rime schema for Jingwei AI Keyboard 26-key pinyin
+schema:
+  schema_id: jingwei_pinyin
+  name: 景威拼音
+  version: "0.12"
+engine:
+  processors:
+    - ascii_composer
+    - recognizer
+    - key_binder
+    - speller
+    - punctuator
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - ascii_segmentor
+    - matcher
+    - abc_segmentor
+    - punct_segmentor
+    - fallback_segmentor
+  translators:
+    - punct_translator
+    - script_translator
+  filters:
+    - uniquifier
+speller:
+  alphabet: zyxwvutsrqponmlkjihgfedcba
+  delimiter: " '"
+translator:
+  dictionary: jingwei
+  enable_sentence: true
+  enable_completion: true
+  spelling_hints: 8
+punctuator:
+  import_preset: default
