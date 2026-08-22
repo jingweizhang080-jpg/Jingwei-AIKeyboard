@@ -6,15 +6,15 @@ import java.util.List;
 /**
  * V0.12 native Rime bridge boundary.
  *
- * This class deliberately loads librime lazily and fails closed so the app can
- * still build and fall back to the existing Java engine while the native .so
- * and JNI implementation are being wired in.
+ * Loads the JNI layer lazily and always fails closed. The keyboard can keep
+ * using the Java fallback while native librime is unavailable, but once the
+ * .so is present PinyinEngine can switch schemas and read real Rime candidates.
  */
 public final class RimeBridge {
     private static final boolean NATIVE_AVAILABLE;
 
     static {
-        boolean loaded = false;
+        boolean loaded;
         try {
             System.loadLibrary("rime_jni");
             loaded = true;
@@ -34,6 +34,15 @@ public final class RimeBridge {
         if (!NATIVE_AVAILABLE) return false;
         try {
             return nativeStart(sharedDir, userDir, versionName);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static boolean setSchema(String schemaId) {
+        if (!NATIVE_AVAILABLE || schemaId == null || schemaId.isEmpty()) return false;
+        try {
+            return nativeSetSchema(schemaId);
         } catch (Throwable ignored) {
             return false;
         }
@@ -97,6 +106,7 @@ public final class RimeBridge {
     }
 
     private static native boolean nativeStart(String sharedDir, String userDir, String versionName);
+    private static native boolean nativeSetSchema(String schemaId);
     private static native void nativeStop();
     private static native void nativeClearComposition();
     private static native boolean nativeProcessAscii(String text);
