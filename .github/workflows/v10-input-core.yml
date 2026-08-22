@@ -1,0 +1,35 @@
+name: V0.10 Input Core Patch
+
+on:
+  push:
+    branches:
+      - dev/v0.10-input-core
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[v10-patch]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: dev/v0.10-input-core
+          fetch-depth: 0
+
+      - name: Apply v0.10 input core patch
+        run: python3 tools/v10_patch.py
+
+      - name: Commit patched sources
+        run: |
+          git config user.name "Jingwei AI Dev Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add app/src/main/java/com/jingwei/aikeyboard/JingweiImeService.java app/src/main/java/com/jingwei/aikeyboard/PinyinEngine.java
+          if git diff --cached --quiet; then
+            echo "No source changes needed"
+            exit 0
+          fi
+          git commit -m "perf(v0.10): latest-only candidates and low-latency haptics [v10-patch]"
+          git push origin HEAD:dev/v0.10-input-core
