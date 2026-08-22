@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: v0-11-rime-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   import:
     if: ${{ !contains(github.event.head_commit.message, '[rime-lexicon]') }}
@@ -33,6 +37,7 @@ jobs:
 
       - name: Commit generated engine and lexicon
         run: |
+          set -e
           git config user.name "Jingwei AI Dev Bot"
           git config user.email "actions@users.noreply.github.com"
           git add app/src/main/assets/pinyin_lexicon.tsv app/src/main/java/com/jingwei/aikeyboard/PinyinEngine.java
@@ -41,4 +46,18 @@ jobs:
             exit 0
           fi
           git commit -m "feat(v0.11): weighted Rime lexicon and T9 decoding [rime-lexicon]"
-          git push origin HEAD:dev/v0.10-input-core
+
+          # The branch may receive another commit while this job is generating the
+          # large lexicon. Rebase the generated commit onto the newest remote tip
+          # instead of failing with a non-fast-forward (fetch first) rejection.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:dev/v0.10-input-core; then
+              exit 0
+            fi
+            echo "Push raced with a newer remote commit; rebasing (attempt $attempt)..."
+            git fetch origin dev/v0.10-input-core
+            git rebase origin/dev/v0.10-input-core
+          done
+
+          echo "Unable to publish V0.11 generated files after retries"
+          exit 1
