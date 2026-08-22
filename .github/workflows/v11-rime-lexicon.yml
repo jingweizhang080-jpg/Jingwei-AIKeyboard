@@ -1,4 +1,4 @@
-name: V0.11 Rime Lexicon Import
+name: V0.11 Rime Weighted Lexicon
 
 on:
   push:
@@ -25,17 +25,20 @@ jobs:
             https://raw.githubusercontent.com/rime/rime-pinyin-simp/master/pinyin_simp.dict.yaml \
             -o /tmp/pinyin_simp.dict.yaml
 
-      - name: Merge frequency-ranked Rime vocabulary
+      - name: Merge weighted Rime vocabulary
         run: python3 tools/v11_import_rime.py
 
-      - name: Commit generated lexicon
+      - name: Patch weighted T9 decoder
+        run: python3 tools/v11_engine_patch.py
+
+      - name: Commit generated engine and lexicon
         run: |
           git config user.name "Jingwei AI Dev Bot"
           git config user.email "actions@users.noreply.github.com"
-          git add app/src/main/assets/pinyin_lexicon.tsv
+          git add app/src/main/assets/pinyin_lexicon.tsv app/src/main/java/com/jingwei/aikeyboard/PinyinEngine.java
           if git diff --cached --quiet; then
-            echo "Lexicon already up to date"
+            echo "V0.11 engine already up to date"
             exit 0
           fi
-          git commit -m "feat(v0.11): import real Rime simplified pinyin lexicon [rime-lexicon]"
+          git commit -m "feat(v0.11): weighted Rime lexicon and T9 decoding [rime-lexicon]"
           git push origin HEAD:dev/v0.10-input-core
