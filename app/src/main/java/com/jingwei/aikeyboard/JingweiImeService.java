@@ -1184,6 +1184,8 @@ public class JingweiImeService extends InputMethodService {
         ic.finishComposingText();
         pinyinGeneration.incrementAndGet();
         pinyinExecutor.getQueue().clear();
+        pinyinGeneration.incrementAndGet();
+        pinyinExecutor.getQueue().clear();
         pinyinBuffer = "";
         lastPinyinCandidates.clear();
         if (pinyinCandidatesBar != null) pinyinCandidatesBar.removeAllViews();
