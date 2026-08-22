@@ -19,17 +19,20 @@ jobs:
           ref: dev/v0.10-input-core
           fetch-depth: 0
 
-      - name: Apply v0.10 input core patch
+      - name: Apply v0.10 input latency patch
         run: python3 tools/v10_patch.py
+
+      - name: Apply v0.10 phrase ranking patch
+        run: python3 tools/v10_rank_patch.py
 
       - name: Commit patched sources
         run: |
           git config user.name "Jingwei AI Dev Bot"
           git config user.email "actions@users.noreply.github.com"
-          git add app/src/main/java/com/jingwei/aikeyboard/JingweiImeService.java app/src/main/java/com/jingwei/aikeyboard/PinyinEngine.java
+          git add app/src/main/java/com/jingwei/aikeyboard/JingweiImeService.java app/src/main/java/com/jingwei/aikeyboard/PinyinEngine.java app/src/main/assets/pinyin_lexicon.tsv
           if git diff --cached --quiet; then
             echo "No source changes needed"
             exit 0
           fi
-          git commit -m "perf(v0.10): latest-only candidates and low-latency haptics [v10-patch]"
+          git commit -m "perf(v0.10): latest-only input, low-latency haptics and phrase ranking [v10-patch]"
           git push origin HEAD:dev/v0.10-input-core
