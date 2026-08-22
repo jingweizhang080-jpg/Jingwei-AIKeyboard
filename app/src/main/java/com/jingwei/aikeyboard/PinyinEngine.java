@@ -33,6 +33,7 @@ public final class PinyinEngine {
     private final Map<String, List<String>> lexicon = new HashMap<>();
     private final Map<String, List<T9Token>> t9Exact = new HashMap<>();
     private final Map<String, T9Token> t9PrefixBest = new HashMap<>();
+    private final Map<String, String> t9Syllable = new HashMap<>();
 
     private final Map<String, List<String>> searchCache = lruMap(160);
     private final Map<String, List<T9State>> t9Cache = lruMap(160);
@@ -90,6 +91,7 @@ public final class PinyinEngine {
         lexicon.clear();
         t9Exact.clear();
         t9PrefixBest.clear();
+        t9Syllable.clear();
         searchCache.clear();
         t9Cache.clear();
 
@@ -117,6 +119,16 @@ public final class PinyinEngine {
                 }
                 if (!words.isEmpty()) {
                     lexicon.put(py, Collections.unmodifiableList(words));
+                    boolean hasSingleChar = false;
+                    for (String w : words) {
+                        if (w.length() == 1) { hasSingleChar = true; break; }
+                    }
+                    if (hasSingleChar && py.length() <= 6) {
+                        String digits = toT9Digits(py);
+                        if (!digits.isEmpty() && !t9Syllable.containsKey(digits)) {
+                            t9Syllable.put(digits, py);
+                        }
+                    }
                 }
             }
         }
@@ -251,6 +263,45 @@ public final class PinyinEngine {
         return new ArrayList<>(saved);
     }
 
+    /** UI-thread safe T9 display. O(n * 6), no Beam search. */
+    public String quickDisplayT9(String digits) {
+        String d = cleanT9(digits);
+        if (d.isEmpty()) return "";
+
+        final int n = d.length();
+        String[] best = new String[n + 1];
+        int[] syllables = new int[n + 1];
+        best[0] = "";
+        for (int i = 1; i <= n; i++) syllables[i] = Integer.MAX_VALUE / 4;
+
+        for (int end = 1; end <= n; end++) {
+            int startMin = Math.max(0, end - 6);
+            for (int start = startMin; start < end; start++) {
+                if (best[start] == null) continue;
+                String py = t9Syllable.get(d.substring(start, end));
+                if (py == null) continue;
+                int count = syllables[start] + 1;
+                // Prefer fewer syllables; ties prefer the longer final syllable.
+                if (best[end] == null || count < syllables[end]
+                        || (count == syllables[end] && py.length() > lastPartLength(best[end]))) {
+                    best[end] = best[start].isEmpty() ? py : best[start] + " " + py;
+                    syllables[end] = count;
+                }
+            }
+        }
+        if (best[n] != null) return best[n];
+
+        // Incomplete last syllable: show the best known prefix without doing a search.
+        T9Token prefix = t9PrefixBest.get(d);
+        return prefix == null ? "" : prefix.pinyin;
+    }
+
+    private int lastPartLength(String value) {
+        if (value == null || value.isEmpty()) return 0;
+        int i = value.lastIndexOf(' ');
+        return i < 0 ? value.length() : value.length() - i - 1;
+    }
+
     public String displayT9(String digits) {
         String d = cleanT9(digits);
         if (d.isEmpty()) return "";
@@ -263,18 +314,7 @@ public final class PinyinEngine {
     }
 
     public String displayT9Safe(String digits) {
-        String d = cleanT9(digits);
-        if (d.isEmpty()) return "";
-
-        String exact = displayT9(d);
-        if (!exact.isEmpty()) return exact;
-
-        // Do not scan the dictionary. Prefix lookup is O(1).
-        for (int cut = d.length() - 1; cut > 0; cut--) {
-            T9Token token = t9PrefixBest.get(d.substring(0, cut));
-            if (token != null) return token.pinyin;
-        }
-        return "";
+        return quickDisplayT9(digits);
     }
 
     public boolean hasT9Prefix(String digits) {

@@ -55,6 +55,10 @@ import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import android.widget.Space;
 
 public class JingweiImeService extends InputMethodService {
@@ -85,6 +89,11 @@ public class JingweiImeService extends InputMethodService {
     private boolean aiPanelExpanded = false;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final ThreadPoolExecutor pinyinExecutor = new ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(1),
+            new ThreadPoolExecutor.DiscardOldestPolicy());
+    private final AtomicInteger pinyinGeneration = new AtomicInteger(0);
     private final Handler main = new Handler(Looper.getMainLooper());
 
     // 长按删除
@@ -543,15 +552,8 @@ public class JingweiImeService extends InputMethodService {
         if (pinyinBuffer.length() >= 64) return;
 
         pinyinBuffer += digit;
-
-        String composing = pinyinEngine == null ? "" : pinyinEngine.displayT9Safe(pinyinBuffer);
-
-        // If the decoder has a pinyin spelling, use composing text.
-        // If it doesn't yet, keep the editor untouched; the candidate UI can still update.
-        if (!composing.isEmpty()) {
-            ic.setComposingText(composing, 1);
-        }
-
+        // V0.10: input event ends immediately. Display/candidates are handled by
+        // the latest-only pipeline so rapid tapping never waits for decoding.
         showPinyinCandidates();
     }
 
@@ -815,23 +817,25 @@ public class JingweiImeService extends InputMethodService {
     }
 
     private void performKeyHaptic(View view) {
-        // First try Android's keyboard tap feedback.
         try {
             if (view != null) {
-                view.performHapticFeedback(
+                boolean handled = view.performHapticFeedback(
                         HapticFeedbackConstants.KEYBOARD_TAP,
-                        HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING);
+                        HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING
+                                | HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING);
+                if (handled) return;
             }
         } catch (Throwable ignored) {}
 
-        // Vendor ROM fallback (ColorOS/OxygenOS etc.): a very short, low-amplitude pulse.
         try {
             Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
             if (vibrator == null || !vibrator.hasVibrator()) return;
+            // Do not queue old pulses: the newest finger-down always wins.
+            vibrator.cancel();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator.vibrate(VibrationEffect.createOneShot(10, 55));
+                vibrator.vibrate(VibrationEffect.createOneShot(5, 80));
             } else {
-                vibrator.vibrate(10);
+                vibrator.vibrate(5);
             }
         } catch (Throwable ignored) {}
     }
@@ -1071,10 +1075,13 @@ public class JingweiImeService extends InputMethodService {
     private void showPinyinCandidates() {
         if (pinyinCandidatesBar == null) return;
 
-        pinyinCandidatesBar.removeAllViews();
-        lastPinyinCandidates = new ArrayList<>();
+        final String snapshot = pinyinBuffer;
+        final boolean snapshotNineKey = nineKeyMode;
+        final int generation = pinyinGeneration.incrementAndGet();
 
-        if (!chineseMode || pinyinBuffer.isEmpty()) {
+        if (!chineseMode || snapshot.isEmpty()) {
+            pinyinCandidatesBar.removeAllViews();
+            lastPinyinCandidates = new ArrayList<>();
             if (composingRow != null) composingRow.setVisibility(View.GONE);
             if (pinyinStatus != null) {
                 pinyinStatus.setVisibility(View.VISIBLE);
@@ -1083,33 +1090,52 @@ public class JingweiImeService extends InputMethodService {
             return;
         }
 
+        // This path is deliberately cheap. Never run Beam search on the UI thread.
         String display;
-        if (nineKeyMode) {
-            display = pinyinEngine == null ? "" : pinyinEngine.displayT9Safe(pinyinBuffer);
+        if (snapshotNineKey) {
+            display = pinyinEngine == null ? "" : pinyinEngine.quickDisplayT9(snapshot);
         } else {
             display = pinyinEngine == null
-                    ? pinyinBuffer.replace("'", " ")
-                    : pinyinEngine.formatForDisplay(pinyinBuffer);
+                    ? snapshot.replace("'", " ")
+                    : pinyinEngine.formatForDisplay(snapshot);
         }
 
-        // Baidu-like composition layout for both 9-key and 26-key:
-        // pinyin occupies a slim row ABOVE the Chinese candidate strip.
         if (composingRow != null) composingRow.setVisibility(View.VISIBLE);
         if (composingText != null) composingText.setText(display);
         if (pinyinStatus != null) pinyinStatus.setVisibility(View.GONE);
-
-        // 9-key keeps "分词"; 26-key hides it for a cleaner Baidu-style line.
         if (composingSplitButton != null) {
-            composingSplitButton.setVisibility(nineKeyMode ? View.VISIBLE : View.GONE);
+            composingSplitButton.setVisibility(snapshotNineKey ? View.VISIBLE : View.GONE);
         }
 
-        List<String> words = pinyinEngine == null
-                ? new ArrayList<>()
-                : (nineKeyMode ? pinyinEngine.searchT9(pinyinBuffer, 10)
-                               : pinyinEngine.search(pinyinBuffer, 10));
-        lastPinyinCandidates = new ArrayList<>(words);
+        InputConnection ic = getCurrentInputConnection();
+        if (ic != null) {
+            if (snapshotNineKey) {
+                if (!display.isEmpty()) ic.setComposingText(display, 1);
+            } else {
+                ic.setComposingText(snapshot, 1);
+            }
+        }
 
-        if (words.isEmpty()) return;
+        // Keep the old candidates on screen until the newest result is ready. This
+        // avoids flicker and makes typing feel continuous.
+        pinyinExecutor.execute(() -> {
+            List<String> words = pinyinEngine == null
+                    ? new ArrayList<>()
+                    : (snapshotNineKey ? pinyinEngine.searchT9(snapshot, 10)
+                                       : pinyinEngine.search(snapshot, 10));
+            main.post(() -> {
+                if (generation != pinyinGeneration.get()) return;
+                if (!snapshot.equals(pinyinBuffer) || snapshotNineKey != nineKeyMode) return;
+                renderPinyinCandidates(words);
+            });
+        });
+    }
+
+    private void renderPinyinCandidates(List<String> words) {
+        if (pinyinCandidatesBar == null) return;
+        pinyinCandidatesBar.removeAllViews();
+        lastPinyinCandidates = new ArrayList<>(words);
+        if (words == null || words.isEmpty()) return;
 
         for (int i = 0; i < words.size(); i++) {
             String word = words.get(i);
@@ -1118,7 +1144,6 @@ public class JingweiImeService extends InputMethodService {
             card.setBackgroundColor(0x00FFFFFF);
             card.setPadding(dp(12), dp(5), dp(12), dp(5));
             card.setOnClickListener(v -> commitPinyinCandidate(word));
-
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1157,6 +1182,8 @@ public class JingweiImeService extends InputMethodService {
         if (ic == null) return;
         ic.commitText(word, 1);
         ic.finishComposingText();
+        pinyinGeneration.incrementAndGet();
+        pinyinExecutor.getQueue().clear();
         pinyinBuffer = "";
         lastPinyinCandidates.clear();
         if (pinyinCandidatesBar != null) pinyinCandidatesBar.removeAllViews();
@@ -1208,6 +1235,8 @@ public class JingweiImeService extends InputMethodService {
     }
 
     private void resetPinyinComposition() {
+        pinyinGeneration.incrementAndGet();
+        pinyinExecutor.getQueue().clear();
         pinyinBuffer = "";
         lastPinyinCandidates.clear();
         InputConnection ic = getCurrentInputConnection();
@@ -1260,22 +1289,7 @@ public class JingweiImeService extends InputMethodService {
                 return;
             }
 
-            String composing;
-            if (nineKeyMode) {
-                composing = pinyinEngine == null ? "" : pinyinEngine.displayT9Safe(pinyinBuffer);
-            } else {
-                composing = pinyinEngine == null
-                        ? pinyinBuffer
-                        : pinyinEngine.formatForDisplay(pinyinBuffer);
-            }
-
-            // Never fall back to raw T9 digits. If the shortened sequence is
-            // temporarily ambiguous, keep the previous editor composition alive
-            // and only refresh the candidate UI.
-            if (!composing.isEmpty()) {
-                ic.setComposingText(composing, 1);
-            }
-
+            // V0.10: let the latest-only pipeline refresh composing/candidates.
             showPinyinCandidates();
             return;
         }
