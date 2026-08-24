@@ -94,6 +94,26 @@ Java_com_jingwei_aikeyboard_RimeBridge_nativeProcessAscii(JNIEnv* env, jclass, j
     return handled ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_jingwei_aikeyboard_RimeBridge_nativeProcessBackspace(JNIEnv*, jclass) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_api || !g_session) return JNI_FALSE;
+    return g_api->process_key(g_session, 0xff08, 0) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_jingwei_aikeyboard_RimeBridge_nativeGetInput(JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_api || !g_session) return s2j(env, "");
+    RIME_STRUCT(RimeContext, ctx);
+    std::string out;
+    if (g_api->get_context(g_session, &ctx)) {
+        if (ctx.input) out = ctx.input;
+        g_api->free_context(&ctx);
+    }
+    return s2j(env, out);
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_jingwei_aikeyboard_RimeBridge_nativeGetComposition(JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -148,7 +168,7 @@ Java_com_jingwei_aikeyboard_RimeBridge_nativeSelectCandidate(JNIEnv* env, jclass
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jingwei_aikeyboard_RimeBridge_nativeSelectSchema(JNIEnv* env, jclass, jstring schemaId) {
+Java_com_jingwei_aikeyboard_RimeBridge_nativeSetSchema(JNIEnv* env, jclass, jstring schemaId) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_api || !g_session) return JNI_FALSE;
     std::string id = j2s(env, schemaId);

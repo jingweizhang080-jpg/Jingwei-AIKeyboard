@@ -43,7 +43,7 @@ public final class RimeRuntime {
                     sharedDir.getAbsolutePath(),
                     userDir.getAbsolutePath(),
                     "0.12.0");
-            if (ready) RimeBridge.selectSchema("jingwei_pinyin");
+            if (ready) RimeBridge.setSchema("jingwei_pinyin");
             return ready;
         } catch (Throwable ignored) {
             ready = false;
@@ -59,7 +59,7 @@ public final class RimeRuntime {
     public boolean useNineKey(boolean enabled) {
         if (!isReady()) return false;
         RimeBridge.clearComposition();
-        return RimeBridge.selectSchema(enabled ? "jingwei_t9" : "jingwei_pinyin");
+        return RimeBridge.setSchema(enabled ? "jingwei_t9" : "jingwei_pinyin");
     }
 
     private void copyAsset(String assetPath) throws Exception {

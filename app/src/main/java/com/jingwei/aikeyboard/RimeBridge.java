@@ -74,6 +74,25 @@ public final class RimeBridge {
         }
     }
 
+    public static boolean processBackspace() {
+        if (!NATIVE_AVAILABLE) return false;
+        try {
+            return nativeProcessBackspace();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static String getInput() {
+        if (!NATIVE_AVAILABLE) return "";
+        try {
+            String value = nativeGetInput();
+            return value == null ? "" : value;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
     public static String getComposition() {
         if (!NATIVE_AVAILABLE) return "";
         try {
@@ -110,6 +129,8 @@ public final class RimeBridge {
     private static native void nativeStop();
     private static native void nativeClearComposition();
     private static native boolean nativeProcessAscii(String text);
+    private static native boolean nativeProcessBackspace();
+    private static native String nativeGetInput();
     private static native String nativeGetComposition();
     private static native String[] nativeGetCandidates(int limit);
     private static native String nativeSelectCandidate(int index);

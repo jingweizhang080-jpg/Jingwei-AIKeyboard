@@ -17,6 +17,20 @@ def replace_once(path: Path, old: str, new: str):
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
     return True
 
+
+# V0.12.1 wires Rime directly in the service and makes the native session the
+# sole production input state. Keep this legacy migration script harmless on
+# already-migrated branches; the workflow still exports the current dictionary
+# and performs the Android build that follows this step.
+service_text = service.read_text(encoding="utf-8")
+runtime_text = runtime.read_text(encoding="utf-8")
+cpp_text = cpp.read_text(encoding="utf-8")
+if ("rimeInputEngine.append" in service_text
+        and "RimeBridge.setSchema" in runtime_text
+        and "RimeBridge_nativeSetSchema" in cpp_text):
+    print("V0.12.1 native wiring already present")
+    raise SystemExit(0)
+
 # Keep Java/native symbol names aligned.
 replace_once(
     cpp,

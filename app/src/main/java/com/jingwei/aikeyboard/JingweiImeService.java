@@ -75,6 +75,7 @@ public class JingweiImeService extends InputMethodService {
     private boolean chineseMode = true;
     private boolean nineKeyMode = false;
     private PinyinEngine pinyinEngine;
+    private RimeInputEngine rimeInputEngine;
     private LinearLayout pinyinCandidatesBar;
     private LinearLayout composingRow;
     private TextView composingText;
@@ -114,6 +115,26 @@ public class JingweiImeService extends InputMethodService {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(6), dp(4), dp(6), 0);
         root.setBackgroundColor(0xFFF1F3F8);
+
+        rimeInputEngine = new RimeInputEngine(this);
+        executor.execute(() -> {
+            boolean started = false;
+            try {
+                started = rimeInputEngine.start();
+            } catch (Throwable ignored) {}
+            final boolean ready = started;
+            main.post(() -> {
+                if (!ready || rimeInputEngine == null) return;
+                String pending = pinyinBuffer;
+                rimeInputEngine.setNineKey(nineKeyMode);
+                for (int i = 0; i < pending.length(); i++) {
+                    rimeInputEngine.append(pending.charAt(i));
+                }
+                pinyinBuffer = rimeInputEngine.rawInput();
+                if (pinyinStatus != null) pinyinStatus.setText("中");
+                showPinyinCandidates();
+            });
+        });
 
         pinyinEngine = new PinyinEngine(this);
         executor.execute(() -> {
@@ -436,6 +457,9 @@ public class JingweiImeService extends InputMethodService {
         if (keyboardPanel == null) return;
         nineKeyMode = false;
         resetPinyinComposition();
+        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            rimeInputEngine.setNineKey(false);
+        }
         try {
             InputConnection ic = getCurrentInputConnection();
             if (ic != null) ic.finishComposingText();
@@ -475,6 +499,9 @@ public class JingweiImeService extends InputMethodService {
         nineKeyMode = true;
         chineseMode = true;
         resetPinyinComposition();
+        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            rimeInputEngine.setNineKey(true);
+        }
         keyboardPanel.removeAllViews();
 
         addNineKeyRow(new String[]{"1\\n分词", "2\\nABC", "3\\nDEF", "⌫"});
@@ -551,7 +578,12 @@ public class JingweiImeService extends InputMethodService {
         // Never commit T9 digits directly into the target editor.
         if (pinyinBuffer.length() >= 64) return;
 
-        pinyinBuffer += digit;
+        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            if (!rimeInputEngine.append(digit.charAt(0))) return;
+            pinyinBuffer = rimeInputEngine.rawInput();
+        } else {
+            pinyinBuffer += digit;
+        }
         // V0.10: input event ends immediately. Display/candidates are handled by
         // the latest-only pipeline so rapid tapping never waits for decoding.
         showPinyinCandidates();
@@ -1092,7 +1124,10 @@ public class JingweiImeService extends InputMethodService {
 
         // This path is deliberately cheap. Never run Beam search on the UI thread.
         String display;
-        if (snapshotNineKey) {
+        final boolean useRime = rimeInputEngine != null && rimeInputEngine.isReady();
+        if (useRime) {
+            display = rimeInputEngine.composition();
+        } else if (snapshotNineKey) {
             display = pinyinEngine == null ? "" : pinyinEngine.quickDisplayT9(snapshot);
         } else {
             display = pinyinEngine == null
@@ -1119,19 +1154,25 @@ public class JingweiImeService extends InputMethodService {
         // Keep the old candidates on screen until the newest result is ready. This
         // avoids flicker and makes typing feel continuous.
         pinyinExecutor.execute(() -> {
-            List<String> words = pinyinEngine == null
-                    ? new ArrayList<>()
-                    : (snapshotNineKey ? pinyinEngine.searchT9(snapshot, 10)
-                                       : pinyinEngine.search(snapshot, 10));
+            List<String> words = useRime
+                    ? new ArrayList<>(rimeInputEngine.candidates(20))
+                    : (pinyinEngine == null
+                            ? new ArrayList<>()
+                            : (snapshotNineKey ? pinyinEngine.searchT9(snapshot, 20)
+                                               : pinyinEngine.search(snapshot, 20)));
             main.post(() -> {
                 if (generation != pinyinGeneration.get()) return;
                 if (!snapshot.equals(pinyinBuffer) || snapshotNineKey != nineKeyMode) return;
-                renderPinyinCandidates(words);
+                renderPinyinCandidates(words, useRime);
             });
         });
     }
 
     private void renderPinyinCandidates(List<String> words) {
+        renderPinyinCandidates(words, false);
+    }
+
+    private void renderPinyinCandidates(List<String> words, boolean nativeCandidates) {
         if (pinyinCandidatesBar == null) return;
         pinyinCandidatesBar.removeAllViews();
         lastPinyinCandidates = new ArrayList<>(words);
@@ -1143,7 +1184,8 @@ public class JingweiImeService extends InputMethodService {
             card.setTextColor(i == 0 ? 0xFF1677FF : 0xFF202124);
             card.setBackgroundColor(0x00FFFFFF);
             card.setPadding(dp(12), dp(5), dp(12), dp(5));
-            card.setOnClickListener(v -> commitPinyinCandidate(word));
+            final int candidateIndex = i;
+            card.setOnClickListener(v -> commitPinyinCandidate(word, nativeCandidates ? candidateIndex : -1));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1163,47 +1205,47 @@ public class JingweiImeService extends InputMethodService {
         }
 
         if (pinyinBuffer.length() >= 64) return;
-        pinyinBuffer += letter;
-        ic.setComposingText(pinyinBuffer, 1);
+        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            if (!rimeInputEngine.append(letter.charAt(0))) return;
+            pinyinBuffer = rimeInputEngine.rawInput();
+        } else {
+            pinyinBuffer += letter;
+        }
         showPinyinCandidates();
     }
 
     private void handlePinyinSeparator() {
         if (!chineseMode || pinyinBuffer.isEmpty()) return;
         if (pinyinBuffer.endsWith("'")) return;
-        pinyinBuffer += "'";
+        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            if (!rimeInputEngine.append('\'')) return;
+            pinyinBuffer = rimeInputEngine.rawInput();
+        } else {
+            pinyinBuffer += "'";
+        }
         InputConnection ic = getCurrentInputConnection();
         if (ic != null) ic.setComposingText(pinyinBuffer, 1);
         showPinyinCandidates();
     }
 
     private void commitPinyinCandidate(String word) {
+        commitPinyinCandidate(word, -1);
+    }
+
+    private void commitPinyinCandidate(String word, int nativeIndex) {
         InputConnection ic = getCurrentInputConnection();
         if (ic == null) return;
+        if (nativeIndex >= 0 && rimeInputEngine != null && rimeInputEngine.isReady()) {
+            String committed = rimeInputEngine.select(nativeIndex);
+            pinyinBuffer = rimeInputEngine.rawInput();
+            if (committed.isEmpty()) {
+                showPinyinCandidates();
+                return;
+            }
+            word = committed;
+        }
         ic.commitText(word, 1);
         ic.finishComposingText();
-        pinyinGeneration.incrementAndGet();
-        pinyinExecutor.getQueue().clear();
-        pinyinGeneration.incrementAndGet();
-        pinyinExecutor.getQueue().clear();
-        pinyinGeneration.incrementAndGet();
-        pinyinExecutor.getQueue().clear();
-        pinyinGeneration.incrementAndGet();
-        pinyinExecutor.getQueue().clear();
-        pinyinGeneration.incrementAndGet();
-        pinyinExecutor.getQueue().clear();
-        pinyinGeneration.incrementAndGet();
-        pinyinExecutor.getQueue().clear();
-        pinyinGeneration.incrementAndGet();
-        pinyinExecutor.getQueue().clear();
-        pinyinGeneration.incrementAndGet();
-        pinyinExecutor.getQueue().clear();
-        pinyinGeneration.incrementAndGet();
-        pinyinExecutor.getQueue().clear();
-        pinyinGeneration.incrementAndGet();
-        pinyinExecutor.getQueue().clear();
-        pinyinGeneration.incrementAndGet();
-        pinyinExecutor.getQueue().clear();
         pinyinGeneration.incrementAndGet();
         pinyinExecutor.getQueue().clear();
         pinyinBuffer = "";
@@ -1260,6 +1302,7 @@ public class JingweiImeService extends InputMethodService {
         pinyinGeneration.incrementAndGet();
         pinyinExecutor.getQueue().clear();
         pinyinBuffer = "";
+        if (rimeInputEngine != null && rimeInputEngine.isReady()) rimeInputEngine.reset();
         lastPinyinCandidates.clear();
         InputConnection ic = getCurrentInputConnection();
         if (ic != null) ic.finishComposingText();
@@ -1303,7 +1346,12 @@ public class JingweiImeService extends InputMethodService {
         // composition buffer, NOT the text editor. This keeps the visible text
         // as pinyin and allows the user to fix one key and continue typing.
         if (chineseMode && !pinyinBuffer.isEmpty()) {
-            pinyinBuffer = pinyinBuffer.substring(0, pinyinBuffer.length() - 1);
+            if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+                if (!rimeInputEngine.backspace()) return;
+                pinyinBuffer = rimeInputEngine.rawInput();
+            } else {
+                pinyinBuffer = pinyinBuffer.substring(0, pinyinBuffer.length() - 1);
+            }
 
             if (pinyinBuffer.isEmpty()) {
                 ic.finishComposingText();
@@ -1471,6 +1519,7 @@ public class JingweiImeService extends InputMethodService {
         deleting = false;
         main.removeCallbacks(deleteRunnable);
         if (speechRecognizer != null) speechRecognizer.destroy();
+        if (rimeInputEngine != null) rimeInputEngine.stop();
         executor.shutdownNow();
         super.onDestroy();
     }

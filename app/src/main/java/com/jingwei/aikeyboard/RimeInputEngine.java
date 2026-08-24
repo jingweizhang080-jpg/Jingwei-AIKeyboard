@@ -8,14 +8,13 @@ import java.util.List;
 /**
  * Stateful facade for the production Rime path.
  *
- * Important invariant: the Java-side buffer and Rime composition are always
- * rebuilt together. Backspace therefore cannot leave stale/mixed pinyin in
- * the native session, which was one of the largest V0.11 UX problems.
+ * Rime owns the only production input state. Java reads the session input and
+ * composition after every operation instead of maintaining a second buffer.
  */
 public final class RimeInputEngine {
     private final RimeRuntime runtime;
-    private final StringBuilder raw = new StringBuilder();
     private boolean nineKey;
+    private boolean schemaSelected;
 
     public RimeInputEngine(Context context) {
         runtime = new RimeRuntime(context);
@@ -30,13 +29,13 @@ public final class RimeInputEngine {
     }
 
     public synchronized boolean setNineKey(boolean enabled) {
+        if (schemaSelected && nineKey == enabled) return true;
         nineKey = enabled;
-        raw.setLength(0);
-        return runtime.useNineKey(enabled);
+        schemaSelected = runtime.useNineKey(enabled);
+        return schemaSelected;
     }
 
     public synchronized void reset() {
-        raw.setLength(0);
         RimeBridge.clearComposition();
     }
 
@@ -47,30 +46,26 @@ public final class RimeInputEngine {
         } else {
             if (!((value >= 'a' && value <= 'z') || value == '\'')) return false;
         }
-        raw.append(value);
         return RimeBridge.processAscii(String.valueOf(value));
     }
 
     /**
-     * Rebuild instead of trusting two independent deletion states. This is a
-     * little more work than sending BackSpace, but composition strings are tiny
-     * and it guarantees that rapid delete can never expose stale Rime pinyin.
+     * Backspace is processed by Rime itself. The caller then reads input and
+     * composition from that same session, so rapid delete cannot expose stale
+     * Java-side pinyin.
      */
     public synchronized boolean backspace() {
-        if (!isReady() || raw.length() == 0) return false;
-        raw.deleteCharAt(raw.length() - 1);
-        replayLocked();
-        return true;
+        return isReady() && !rawInput().isEmpty() && RimeBridge.processBackspace();
     }
 
     public synchronized String rawInput() {
-        return raw.toString();
+        return isReady() ? RimeBridge.getInput() : "";
     }
 
     public synchronized String composition() {
-        if (!isReady()) return raw.toString();
+        if (!isReady()) return "";
         String value = RimeBridge.getComposition();
-        return value == null || value.isEmpty() ? raw.toString() : value;
+        return value == null || value.isEmpty() ? rawInput() : value;
     }
 
     public synchronized List<String> candidates(int limit) {
@@ -82,18 +77,13 @@ public final class RimeInputEngine {
         if (!isReady()) return "";
         String committed = RimeBridge.selectCandidate(index);
         if (committed != null && !committed.isEmpty()) {
-            raw.setLength(0);
+            schemaSelected = true;
         }
         return committed == null ? "" : committed;
     }
 
     public synchronized void stop() {
-        raw.setLength(0);
+        schemaSelected = false;
         runtime.stop();
-    }
-
-    private void replayLocked() {
-        RimeBridge.clearComposition();
-        if (raw.length() > 0) RimeBridge.processAscii(raw.toString());
     }
 }
