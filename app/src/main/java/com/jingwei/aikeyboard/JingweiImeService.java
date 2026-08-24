@@ -1121,8 +1121,8 @@ public class JingweiImeService extends InputMethodService {
         pinyinExecutor.execute(() -> {
             List<String> words = pinyinEngine == null
                     ? new ArrayList<>()
-                    : (snapshotNineKey ? pinyinEngine.searchT9(snapshot, 10)
-                                       : pinyinEngine.search(snapshot, 10));
+                    : (snapshotNineKey ? pinyinEngine.searchT9(snapshot, 18)
+                                       : pinyinEngine.search(snapshot, 18));
             main.post(() -> {
                 if (generation != pinyinGeneration.get()) return;
                 if (!snapshot.equals(pinyinBuffer) || snapshotNineKey != nineKeyMode) return;
@@ -1303,15 +1303,23 @@ public class JingweiImeService extends InputMethodService {
         // composition buffer, NOT the text editor. This keeps the visible text
         // as pinyin and allows the user to fix one key and continue typing.
         if (chineseMode && !pinyinBuffer.isEmpty()) {
+            // V0.11.1: deletion is a hard generation boundary. Never leave
+            // candidates from the longer, pre-delete composition on screen.
+            pinyinGeneration.incrementAndGet();
+            lastPinyinCandidates = new ArrayList<>();
+            if (pinyinCandidatesBar != null) pinyinCandidatesBar.removeAllViews();
+
             pinyinBuffer = pinyinBuffer.substring(0, pinyinBuffer.length() - 1);
 
             if (pinyinBuffer.isEmpty()) {
                 ic.finishComposingText();
-                showPinyinCandidates();
+                if (composingText != null) composingText.setText("");
+                if (composingRow != null) composingRow.setVisibility(View.GONE);
                 return;
             }
 
-            // V0.10: let the latest-only pipeline refresh composing/candidates.
+            // Recompute only from the new buffer. Old async work is ignored by
+            // generation checks, while the row is refreshed synchronously.
             showPinyinCandidates();
             return;
         }
