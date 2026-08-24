@@ -1,0 +1,66 @@
+name: V0.11 Candidate and Delete Stability Fix
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dev/v0.10-input-core
+    paths:
+      - '.github/workflows/v011-candidate-delete-fix.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: v011-candidate-delete-fix
+  cancel-in-progress: true
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev/v0.10-input-core
+          fetch-depth: 0
+
+      - name: Patch IME candidate count and delete state
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/src/main/java/com/jingwei/aikeyboard/JingweiImeService.java')
+          s = p.read_text(encoding='utf-8')
+
+          # Show more choices without widening the synchronous/UI-thread work.
+          s = s.replace('snapshotNineKey ? pinyinEngine.searchT9(snapshot, 10)\n                                       : pinyinEngine.search(snapshot, 10)',
+                        'snapshotNineKey ? pinyinEngine.searchT9(snapshot, 18)\n                                       : pinyinEngine.search(snapshot, 18)')
+
+          # Deletion must invalidate and clear stale candidate UI immediately.
+          old = '''        if (chineseMode && !pinyinBuffer.isEmpty()) {\n            pinyinBuffer = pinyinBuffer.substring(0, pinyinBuffer.length() - 1);\n\n            if (pinyinBuffer.isEmpty()) {\n                ic.finishComposingText();\n                showPinyinCandidates();\n                return;\n            }\n\n            // V0.10: let the latest-only pipeline refresh composing/candidates.\n            showPinyinCandidates();\n            return;\n        }'''
+          new = '''        if (chineseMode && !pinyinBuffer.isEmpty()) {\n            // V0.11.1: deletion is a hard generation boundary. Never leave\n            // candidates from the longer, pre-delete composition on screen.\n            pinyinGeneration.incrementAndGet();\n            lastPinyinCandidates = new ArrayList<>();\n            if (pinyinCandidatesBar != null) pinyinCandidatesBar.removeAllViews();\n\n            pinyinBuffer = pinyinBuffer.substring(0, pinyinBuffer.length() - 1);\n\n            if (pinyinBuffer.isEmpty()) {\n                ic.finishComposingText();\n                if (composingText != null) composingText.setText(\"\");\n                if (composingRow != null) composingRow.setVisibility(View.GONE);\n                return;\n            }\n\n            // Recompute only from the new buffer. Old async work is ignored by\n            // generation checks, while the row is refreshed synchronously.\n            showPinyinCandidates();\n            return;\n        }'''
+          if old not in s:
+              raise SystemExit('delete block not found; refusing unsafe patch')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s, encoding='utf-8')
+
+          # Bump preview version so the installed APK is easy to identify.
+          g = Path('app/build.gradle')
+          t = g.read_text(encoding='utf-8')
+          t = t.replace('versionCode 28', 'versionCode 29')
+          t = t.replace('versionName "0.11.0-preview1"', 'versionName "0.11.1-preview2"')
+          g.write_text(t, encoding='utf-8')
+          PY
+
+      - name: Commit patch
+        run: |
+          git config user.name 'Jingwei AI Dev Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add app/src/main/java/com/jingwei/aikeyboard/JingweiImeService.java app/build.gradle
+          if git diff --cached --quiet; then
+            echo 'No changes needed.'
+            exit 0
+          fi
+          git commit -m 'fix(v0.11.1): expand candidates and stabilize deletion composition'
+          git pull --rebase origin dev/v0.10-input-core
+          git push origin HEAD:dev/v0.10-input-core
