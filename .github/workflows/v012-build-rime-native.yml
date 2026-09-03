@@ -58,26 +58,67 @@ jobs:
           xmake -y -vD
           find ../app/src/main/jniLibs -maxdepth 3 -type f -print || true
 
-      - name: Verify rime_jni.so and required JNI symbols
+      - name: Normalize Android JNI library name
         run: |
-          test -f app/src/main/jniLibs/arm64-v8a/librime_jni.so || test -f app/src/main/jniLibs/arm64-v8a/rime_jni.so
-          if [ -f app/src/main/jniLibs/arm64-v8a/librime_jni.so ]; then
-            mv app/src/main/jniLibs/arm64-v8a/librime_jni.so app/src/main/jniLibs/arm64-v8a/rime_jni.so
+          set -e
+          DIR=app/src/main/jniLibs/arm64-v8a
+          mkdir -p "$DIR"
+          # Android System.loadLibrary("rime_jni") resolves librime_jni.so.
+          # Earlier previews accidentally renamed it to rime_jni.so, which made
+          # the native engine permanently unavailable at runtime.
+          if [ ! -f "$DIR/librime_jni.so" ] && [ -f "$DIR/rime_jni.so" ]; then
+            mv "$DIR/rime_jni.so" "$DIR/librime_jni.so"
           fi
-          SO=app/src/main/jniLibs/arm64-v8a/rime_jni.so
-          ls -lh "$SO"
+          test -f "$DIR/librime_jni.so"
+          rm -f "$DIR/rime_jni.so"
+          ls -lh "$DIR/librime_jni.so"
+
+      - name: Verify JNI symbols
+        run: |
+          set -e
+          SO=app/src/main/jniLibs/arm64-v8a/librime_jni.so
           NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
           "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeStart'
           "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeSetSchema'
           "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeProcessBackspace'
           "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeGetInput'
+          "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeGetComposition'
           "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeGetCandidates'
+          "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeSelectCandidate'
 
-      - name: Commit generated Rime assets and native library safely
+      - name: Build installable debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Verify APK contains native Rime and schemas
         run: |
           set -e
-          cp app/src/main/jniLibs/arm64-v8a/rime_jni.so /tmp/rime_jni.so
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          unzip -l "$APK" | grep 'lib/arm64-v8a/librime_jni.so'
+          unzip -l "$APK" | grep 'assets/rime/jingwei_pinyin.schema.yaml'
+          unzip -l "$APK" | grep 'assets/rime/jingwei_t9.schema.yaml'
+          unzip -l "$APK" | grep 'assets/rime/jingwei.dict.yaml'
+          if unzip -l "$APK" | grep -q 'lib/arm64-v8a/rime_jni.so'; then
+            echo 'Wrong legacy JNI filename is still packaged.' >&2
+            exit 1
+          fi
+
+      - name: Upload V0.12 preview APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: JingweiAIKeyboard-v0.12.2-rime-preview2-arm64
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Commit generated Rime assets and correctly named native library
+        run: |
+          set -e
+          cp app/src/main/jniLibs/arm64-v8a/librime_jni.so /tmp/librime_jni.so
           cp app/src/main/assets/rime/jingwei.dict.yaml /tmp/jingwei.dict.yaml
+          git restore gradlew || true
           git config user.name 'Jingwei AI Dev Bot'
           git config user.email 'actions@users.noreply.github.com'
 
@@ -86,16 +127,17 @@ jobs:
             git fetch origin dev/v0.12-rime
             git reset --hard origin/dev/v0.12-rime
             mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/assets/rime
-            cp /tmp/rime_jni.so app/src/main/jniLibs/arm64-v8a/rime_jni.so
+            rm -f app/src/main/jniLibs/arm64-v8a/rime_jni.so
+            cp /tmp/librime_jni.so app/src/main/jniLibs/arm64-v8a/librime_jni.so
             cp /tmp/jingwei.dict.yaml app/src/main/assets/rime/jingwei.dict.yaml
-            git add app/src/main/assets/rime/jingwei.dict.yaml app/src/main/jniLibs/arm64-v8a/rime_jni.so
+            git add -A app/src/main/jniLibs/arm64-v8a app/src/main/assets/rime/jingwei.dict.yaml
 
             if git diff --cached --quiet; then
               echo 'Generated files already match the latest branch.'
               exit 0
             fi
 
-            git commit -m 'build(v0.12): bundle verified Rime dictionary and arm64 engine [skip ci]'
+            git commit -m 'build(v0.12): bundle loadable Rime arm64 engine [skip ci]'
             if git push origin HEAD:dev/v0.12-rime; then
               exit 0
             fi
