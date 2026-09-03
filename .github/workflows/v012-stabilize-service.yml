@@ -41,6 +41,7 @@ jobs:
       - name: Commit stabilized service
         run: |
           set -e
+          git restore gradlew
           git config user.name 'Jingwei AI Dev Bot'
           git config user.email 'actions@users.noreply.github.com'
           git add app/src/main/java/com/jingwei/aikeyboard/JingweiImeService.java app/build.gradle
@@ -49,6 +50,4 @@ jobs:
             exit 0
           fi
           git commit -m 'fix(v0.12): stabilize native candidate and mode state [skip ci]'
-          git fetch origin dev/v0.12-rime
-          git rebase origin/dev/v0.12-rime
           git push origin HEAD:dev/v0.12-rime
