@@ -1144,15 +1144,19 @@ public class JingweiImeService extends InputMethodService {
 
         InputConnection ic = getCurrentInputConnection();
         if (ic != null) {
-            if (snapshotNineKey) {
-                if (!display.isEmpty()) ic.setComposingText(display, 1);
-            } else {
-                ic.setComposingText(snapshot, 1);
+            String composingForEditor = useRime
+                    ? display
+                    : (snapshotNineKey ? display : snapshot);
+            if (!composingForEditor.isEmpty()) {
+                ic.setComposingText(composingForEditor, 1);
             }
         }
 
-        // Keep the old candidates on screen until the newest result is ready. This
-        // avoids flicker and makes typing feel continuous.
+        // Never leave candidates from an older composition visible/clickable.
+        // Rime is the source of truth, so an outdated row is worse than a tiny refresh gap.
+        pinyinCandidatesBar.removeAllViews();
+        lastPinyinCandidates = new ArrayList<>();
+
         pinyinExecutor.execute(() -> {
             List<String> words = useRime
                     ? new ArrayList<>(rimeInputEngine.candidates(20))
@@ -1246,6 +1250,11 @@ public class JingweiImeService extends InputMethodService {
         }
         ic.commitText(word, 1);
         ic.finishComposingText();
+        // A committed editor word must also end the native Rime composition.
+        // Otherwise the next key is appended to the previous hidden session input.
+        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            rimeInputEngine.reset();
+        }
         pinyinGeneration.incrementAndGet();
         pinyinExecutor.getQueue().clear();
         pinyinBuffer = "";
@@ -1259,13 +1268,22 @@ public class JingweiImeService extends InputMethodService {
         if (ic == null) return;
 
         if (!lastPinyinCandidates.isEmpty()) {
-            commitPinyinCandidate(lastPinyinCandidates.get(0));
+            if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+                // Space selects Rime candidate #0 through Rime itself. Do not bypass
+                // the native session by committing only the visible String.
+                commitPinyinCandidate(lastPinyinCandidates.get(0), 0);
+            } else {
+                commitPinyinCandidate(lastPinyinCandidates.get(0));
+            }
         } else {
             String raw = nineKeyMode && pinyinEngine != null
                     ? pinyinEngine.displayT9Safe(pinyinBuffer)
                     : pinyinBuffer;
             ic.commitText(raw, 1);
             ic.finishComposingText();
+            if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+                rimeInputEngine.reset();
+            }
             pinyinBuffer = "";
             if (pinyinCandidatesBar != null) pinyinCandidatesBar.removeAllViews();
         }
