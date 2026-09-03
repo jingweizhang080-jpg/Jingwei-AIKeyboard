@@ -126,11 +126,23 @@ public class JingweiImeService extends InputMethodService {
             main.post(() -> {
                 if (!ready || rimeInputEngine == null) return;
                 String pending = pinyinBuffer;
-                rimeInputEngine.setNineKey(nineKeyMode);
-                for (int i = 0; i < pending.length(); i++) {
-                    rimeInputEngine.append(pending.charAt(i));
+                boolean replayed = rimeInputEngine.setNineKey(nineKeyMode);
+                if (replayed) {
+                    for (int i = 0; i < pending.length(); i++) {
+                        if (!rimeInputEngine.append(pending.charAt(i))) {
+                            replayed = false;
+                            break;
+                        }
+                    }
                 }
-                pinyinBuffer = rimeInputEngine.rawInput();
+                if (replayed) {
+                    pinyinBuffer = rimeInputEngine.rawInput();
+                } else {
+                    // Keep the Java buffer intact and fall back cleanly instead of
+                    // letting the UI mode diverge from the native Rime schema.
+                    rimeInputEngine.stop();
+                    pinyinBuffer = pending;
+                }
                 if (pinyinStatus != null) pinyinStatus.setText("中");
                 showPinyinCandidates();
             });
@@ -457,8 +469,9 @@ public class JingweiImeService extends InputMethodService {
         if (keyboardPanel == null) return;
         nineKeyMode = false;
         resetPinyinComposition();
-        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
-            rimeInputEngine.setNineKey(false);
+        if (rimeInputEngine != null && rimeInputEngine.isReady()
+                && !rimeInputEngine.setNineKey(false)) {
+            rimeInputEngine.stop();
         }
         try {
             InputConnection ic = getCurrentInputConnection();
@@ -499,8 +512,9 @@ public class JingweiImeService extends InputMethodService {
         nineKeyMode = true;
         chineseMode = true;
         resetPinyinComposition();
-        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
-            rimeInputEngine.setNineKey(true);
+        if (rimeInputEngine != null && rimeInputEngine.isReady()
+                && !rimeInputEngine.setNineKey(true)) {
+            rimeInputEngine.stop();
         }
         keyboardPanel.removeAllViews();
 
@@ -1239,7 +1253,9 @@ public class JingweiImeService extends InputMethodService {
     private void commitPinyinCandidate(String word, int nativeIndex) {
         InputConnection ic = getCurrentInputConnection();
         if (ic == null) return;
-        if (nativeIndex >= 0 && rimeInputEngine != null && rimeInputEngine.isReady()) {
+        boolean nativeSelection = nativeIndex >= 0
+                && rimeInputEngine != null && rimeInputEngine.isReady();
+        if (nativeSelection) {
             String committed = rimeInputEngine.select(nativeIndex);
             pinyinBuffer = rimeInputEngine.rawInput();
             if (committed.isEmpty()) {
@@ -1249,9 +1265,18 @@ public class JingweiImeService extends InputMethodService {
             word = committed;
         }
         ic.commitText(word, 1);
+
+        // Most Rime candidate selections finish the whole composition. If Rime
+        // intentionally keeps a remainder, preserve it instead of erasing it.
+        if (nativeSelection && !pinyinBuffer.isEmpty()) {
+            pinyinGeneration.incrementAndGet();
+            pinyinExecutor.getQueue().clear();
+            lastPinyinCandidates.clear();
+            showPinyinCandidates();
+            return;
+        }
+
         ic.finishComposingText();
-        // A committed editor word must also end the native Rime composition.
-        // Otherwise the next key is appended to the previous hidden session input.
         if (rimeInputEngine != null && rimeInputEngine.isReady()) {
             rimeInputEngine.reset();
         }
@@ -1267,14 +1292,19 @@ public class JingweiImeService extends InputMethodService {
         InputConnection ic = getCurrentInputConnection();
         if (ic == null) return;
 
-        if (!lastPinyinCandidates.isEmpty()) {
-            if (rimeInputEngine != null && rimeInputEngine.isReady()) {
-                // Space selects Rime candidate #0 through Rime itself. Do not bypass
-                // the native session by committing only the visible String.
-                commitPinyinCandidate(lastPinyinCandidates.get(0), 0);
-            } else {
-                commitPinyinCandidate(lastPinyinCandidates.get(0));
+        // Candidate rendering is asynchronous, but Space is an input action and
+        // must never depend on whether the UI row has finished refreshing. Ask the
+        // native session directly first so rapid typing + Space still selects #0.
+        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            List<String> nativeWords = rimeInputEngine.candidates(1);
+            if (!nativeWords.isEmpty()) {
+                commitPinyinCandidate(nativeWords.get(0), 0);
+                return;
             }
+        }
+
+        if (!lastPinyinCandidates.isEmpty()) {
+            commitPinyinCandidate(lastPinyinCandidates.get(0));
         } else {
             String raw = nineKeyMode && pinyinEngine != null
                     ? pinyinEngine.displayT9Safe(pinyinBuffer)
@@ -1539,6 +1569,7 @@ public class JingweiImeService extends InputMethodService {
         if (speechRecognizer != null) speechRecognizer.destroy();
         if (rimeInputEngine != null) rimeInputEngine.stop();
         executor.shutdownNow();
+        pinyinExecutor.shutdownNow();
         super.onDestroy();
     }
 
