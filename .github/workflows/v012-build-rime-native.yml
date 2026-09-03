@@ -89,21 +89,42 @@ jobs:
       - name: Build installable debug APK
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon
+          ./gradlew clean :app:assembleDebug --no-daemon
 
       - name: Verify APK contains native Rime and schemas
         run: |
-          set -e
-          APK=app/build/outputs/apk/debug/app-debug.apk
-          test -f "$APK"
-          unzip -l "$APK" | grep 'lib/arm64-v8a/librime_jni.so'
-          unzip -l "$APK" | grep 'assets/rime/jingwei_pinyin.schema.yaml'
-          unzip -l "$APK" | grep 'assets/rime/jingwei_t9.schema.yaml'
-          unzip -l "$APK" | grep 'assets/rime/jingwei.dict.yaml'
-          if unzip -l "$APK" | grep -q 'lib/arm64-v8a/rime_jni.so'; then
-            echo 'Wrong legacy JNI filename is still packaged.' >&2
-            exit 1
-          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          apk = Path("app/build/outputs/apk/debug/app-debug.apk")
+          if not apk.is_file():
+              raise SystemExit(f"APK not found: {apk}")
+
+          with zipfile.ZipFile(apk) as z:
+              names = set(z.namelist())
+
+          required = {
+              "lib/arm64-v8a/librime_jni.so",
+              "assets/rime/jingwei_pinyin.schema.yaml",
+              "assets/rime/jingwei_t9.schema.yaml",
+              "assets/rime/jingwei.dict.yaml",
+          }
+          missing = required - names
+          if missing:
+              native = sorted(n for n in names if n.startswith("lib/arm64-v8a/"))
+              rime_assets = sorted(n for n in names if n.startswith("assets/rime/"))
+              raise SystemExit(
+                  "Missing from APK: " + ", ".join(sorted(missing))
+                  + "\narm64 entries: " + repr(native)
+                  + "\nrime asset entries: " + repr(rime_assets)
+              )
+
+          if "lib/arm64-v8a/rime_jni.so" in names:
+              raise SystemExit("Legacy wrong JNI filename is still packaged")
+
+          print("APK native/assets verification passed")
+          PY
 
       - name: Upload V0.12 preview APK
         uses: actions/upload-artifact@v4
