@@ -1,0 +1,224 @@
+name: V0.12 Stabilize Rime Service
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dev/v0.12-rime
+    paths:
+      - '.github/workflows/v012-stabilize-service.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  stabilize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout latest V0.12
+        uses: actions/checkout@v4
+        with:
+          ref: dev/v0.12-rime
+          fetch-depth: 0
+
+      - name: Apply service state fixes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          service = Path('app/src/main/java/com/jingwei/aikeyboard/JingweiImeService.java')
+          s = service.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+'''            main.post(() -> {
+                if (!ready || rimeInputEngine == null) return;
+                String pending = pinyinBuffer;
+                rimeInputEngine.setNineKey(nineKeyMode);
+                for (int i = 0; i < pending.length(); i++) {
+                    rimeInputEngine.append(pending.charAt(i));
+                }
+                pinyinBuffer = rimeInputEngine.rawInput();
+                if (pinyinStatus != null) pinyinStatus.setText("中");
+                showPinyinCandidates();
+            });''',
+'''            main.post(() -> {
+                if (!ready || rimeInputEngine == null) return;
+                String pending = pinyinBuffer;
+                boolean replayed = rimeInputEngine.setNineKey(nineKeyMode);
+                if (replayed) {
+                    for (int i = 0; i < pending.length(); i++) {
+                        if (!rimeInputEngine.append(pending.charAt(i))) {
+                            replayed = false;
+                            break;
+                        }
+                    }
+                }
+                if (replayed) {
+                    pinyinBuffer = rimeInputEngine.rawInput();
+                } else {
+                    // Keep the Java buffer intact and fall back cleanly instead of
+                    // letting the UI mode diverge from the native Rime schema.
+                    rimeInputEngine.stop();
+                    pinyinBuffer = pending;
+                }
+                if (pinyinStatus != null) pinyinStatus.setText("中");
+                showPinyinCandidates();
+            });'''
+              ),
+              (
+'''        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            rimeInputEngine.setNineKey(false);
+        }''',
+'''        if (rimeInputEngine != null && rimeInputEngine.isReady()
+                && !rimeInputEngine.setNineKey(false)) {
+            rimeInputEngine.stop();
+        }'''
+              ),
+              (
+'''        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            rimeInputEngine.setNineKey(true);
+        }''',
+'''        if (rimeInputEngine != null && rimeInputEngine.isReady()
+                && !rimeInputEngine.setNineKey(true)) {
+            rimeInputEngine.stop();
+        }'''
+              ),
+              (
+'''        if (nativeIndex >= 0 && rimeInputEngine != null && rimeInputEngine.isReady()) {
+            String committed = rimeInputEngine.select(nativeIndex);
+            pinyinBuffer = rimeInputEngine.rawInput();
+            if (committed.isEmpty()) {
+                showPinyinCandidates();
+                return;
+            }
+            word = committed;
+        }
+        ic.commitText(word, 1);
+        ic.finishComposingText();
+        // A committed editor word must also end the native Rime composition.
+        // Otherwise the next key is appended to the previous hidden session input.
+        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            rimeInputEngine.reset();
+        }
+        pinyinGeneration.incrementAndGet();
+        pinyinExecutor.getQueue().clear();
+        pinyinBuffer = "";
+        lastPinyinCandidates.clear();
+        if (pinyinCandidatesBar != null) pinyinCandidatesBar.removeAllViews();''',
+'''        boolean nativeSelection = nativeIndex >= 0
+                && rimeInputEngine != null && rimeInputEngine.isReady();
+        if (nativeSelection) {
+            String committed = rimeInputEngine.select(nativeIndex);
+            pinyinBuffer = rimeInputEngine.rawInput();
+            if (committed.isEmpty()) {
+                showPinyinCandidates();
+                return;
+            }
+            word = committed;
+        }
+        ic.commitText(word, 1);
+
+        // Most Rime candidate selections finish the whole composition. If Rime
+        // intentionally keeps a remainder, preserve it instead of erasing it.
+        if (nativeSelection && !pinyinBuffer.isEmpty()) {
+            pinyinGeneration.incrementAndGet();
+            pinyinExecutor.getQueue().clear();
+            lastPinyinCandidates.clear();
+            showPinyinCandidates();
+            return;
+        }
+
+        ic.finishComposingText();
+        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            rimeInputEngine.reset();
+        }
+        pinyinGeneration.incrementAndGet();
+        pinyinExecutor.getQueue().clear();
+        pinyinBuffer = "";
+        lastPinyinCandidates.clear();
+        if (pinyinCandidatesBar != null) pinyinCandidatesBar.removeAllViews();'''
+              ),
+              (
+'''        if (!lastPinyinCandidates.isEmpty()) {
+            if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+                // Space selects Rime candidate #0 through Rime itself. Do not bypass
+                // the native session by committing only the visible String.
+                commitPinyinCandidate(lastPinyinCandidates.get(0), 0);
+            } else {
+                commitPinyinCandidate(lastPinyinCandidates.get(0));
+            }
+        } else {''',
+'''        // Candidate rendering is asynchronous, but Space is an input action and
+        // must never depend on whether the UI row has finished refreshing. Ask the
+        // native session directly first so rapid typing + Space still selects #0.
+        if (rimeInputEngine != null && rimeInputEngine.isReady()) {
+            List<String> nativeWords = rimeInputEngine.candidates(1);
+            if (!nativeWords.isEmpty()) {
+                commitPinyinCandidate(nativeWords.get(0), 0);
+                return;
+            }
+        }
+
+        if (!lastPinyinCandidates.isEmpty()) {
+            commitPinyinCandidate(lastPinyinCandidates.get(0));
+        } else {'''
+              ),
+              (
+'''        if (rimeInputEngine != null) rimeInputEngine.stop();
+        executor.shutdownNow();
+        super.onDestroy();''',
+'''        if (rimeInputEngine != null) rimeInputEngine.stop();
+        executor.shutdownNow();
+        pinyinExecutor.shutdownNow();
+        super.onDestroy();'''
+              ),
+          ]
+
+          changed = False
+          for old, new in replacements:
+              if old in s:
+                  s = s.replace(old, new, 1)
+                  changed = True
+              elif new not in s:
+                  raise SystemExit('Expected service block not found; refusing unsafe patch:\n' + old[:220])
+
+          service.write_text(s, encoding='utf-8', newline='\n')
+
+          gradle = Path('app/build.gradle')
+          g = gradle.read_text(encoding='utf-8')
+          g2 = g.replace('versionCode 30', 'versionCode 31', 1)
+          g2 = g2.replace('versionName "0.12.1-rime-preview1"', 'versionName "0.12.2-rime-preview2"', 1)
+          if g2 == g and 'versionName "0.12.2-rime-preview2"' not in g:
+              raise SystemExit('Expected version block not found')
+          gradle.write_text(g2, encoding='utf-8', newline='\n')
+
+          print('service stabilization applied' if changed else 'service stabilization already present')
+          PY
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Compile Java
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:compileDebugJavaWithJavac --no-daemon
+
+      - name: Commit stabilized service
+        run: |
+          set -e
+          git config user.name 'Jingwei AI Dev Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add app/src/main/java/com/jingwei/aikeyboard/JingweiImeService.java app/build.gradle
+          if git diff --cached --quiet; then
+            echo 'Service stabilization already present.'
+            exit 0
+          fi
+          git commit -m 'fix(v0.12): stabilize native candidate and mode state [skip ci]'
+          git fetch origin dev/v0.12-rime
+          git rebase origin/dev/v0.12-rime
+          git push origin HEAD:dev/v0.12-rime
