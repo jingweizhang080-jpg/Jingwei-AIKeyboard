@@ -20,19 +20,32 @@ public final class RimeInputEngine {
         runtime = new RimeRuntime(context);
     }
 
-    public boolean start() {
-        return runtime.start();
+    public synchronized boolean start() {
+        boolean started = runtime.start();
+        schemaSelected = started;
+        if (started) nineKey = false;
+        return started;
     }
 
     public boolean isReady() {
-        return runtime.isReady();
+        return runtime.isReady() && schemaSelected;
     }
 
+    /**
+     * Switch schemas atomically from Java's point of view. The mode flag is
+     * updated only after Rime confirms the switch, so a failed schema change
+     * can never make Java send T9 digits into the 26-key schema (or vice versa).
+     */
     public synchronized boolean setNineKey(boolean enabled) {
+        if (!runtime.isReady()) return false;
         if (schemaSelected && nineKey == enabled) return true;
-        nineKey = enabled;
-        schemaSelected = runtime.useNineKey(enabled);
-        return schemaSelected;
+
+        boolean switched = runtime.useNineKey(enabled);
+        if (switched) {
+            nineKey = enabled;
+            schemaSelected = true;
+        }
+        return switched;
     }
 
     public synchronized void reset() {
@@ -78,14 +91,12 @@ public final class RimeInputEngine {
     public synchronized String select(int index) {
         if (!isReady()) return "";
         String committed = RimeBridge.selectCandidate(index);
-        if (committed != null && !committed.isEmpty()) {
-            schemaSelected = true;
-        }
         return committed == null ? "" : committed;
     }
 
     public synchronized void stop() {
         schemaSelected = false;
+        nineKey = false;
         runtime.stop();
     }
 }
