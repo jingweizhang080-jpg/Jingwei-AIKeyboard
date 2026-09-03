@@ -2,7 +2,7 @@
 schema:
   schema_id: jingwei_t9
   name: 景威九键
-  version: "0.12"
+  version: "0.12.2"
 engine:
   processors:
     - ascii_composer
@@ -29,20 +29,16 @@ translator:
   prism: jingwei_t9
   enable_sentence: true
   enable_completion: true
-  spelling_hints: 8
+  spelling_hints: 10
 speller:
-  alphabet: zyxwvutsrqponmlkjihgfedcba987654321
-  initials: zyxwvutsrqponmlkjihgfedcba987654321
+  # In native T9 mode the keyboard sends digits only. Convert every pinyin
+  # letter deterministically to its phone-key digit when Rime builds the prism.
+  # This avoids the old Java/beam-search path guessing a pinyin string first.
+  alphabet: "98765432"
+  initials: "98765432"
   delimiter: " '"
   algebra:
-    - derive/[abc]/2/
-    - derive/[def]/3/
-    - derive/[ghi]/4/
-    - derive/[jkl]/5/
-    - derive/[mno]/6/
-    - derive/[pqrs]/7/
-    - derive/[tuv]/8/
-    - derive/[wxyz]/9/
+    - xlit/abcdefghijklmnopqrstuvwxyz/22233344455566677778889999/
 key_binder:
   bindings:
     - { when: has_menu, accept: 1, send: apostrophe }
