@@ -36,13 +36,15 @@ public final class RimeInputEngine {
     }
 
     public synchronized void reset() {
-        RimeBridge.clearComposition();
+        if (isReady()) RimeBridge.clearComposition();
     }
 
     public synchronized boolean append(char value) {
         if (!isReady()) return false;
         if (nineKey) {
-            if (value < '2' || value > '9') return false;
+            // 2-9 are T9 input. Apostrophe is also accepted as an explicit
+            // syllable boundary so the “分词” key works in the native path.
+            if (!((value >= '2' && value <= '9') || value == '\'')) return false;
         } else {
             if (!((value >= 'a' && value <= 'z') || value == '\'')) return false;
         }
@@ -70,7 +72,7 @@ public final class RimeInputEngine {
 
     public synchronized List<String> candidates(int limit) {
         if (!isReady()) return Collections.emptyList();
-        return RimeBridge.getCandidates(Math.max(1, limit));
+        return RimeBridge.getCandidates(Math.max(1, Math.min(limit, 30)));
     }
 
     public synchronized String select(int index) {
