@@ -58,23 +58,49 @@ jobs:
           xmake -y -vD
           find ../app/src/main/jniLibs -maxdepth 3 -type f -print || true
 
-      - name: Verify rime_jni.so
+      - name: Verify rime_jni.so and required JNI symbols
         run: |
           test -f app/src/main/jniLibs/arm64-v8a/librime_jni.so || test -f app/src/main/jniLibs/arm64-v8a/rime_jni.so
           if [ -f app/src/main/jniLibs/arm64-v8a/librime_jni.so ]; then
             mv app/src/main/jniLibs/arm64-v8a/librime_jni.so app/src/main/jniLibs/arm64-v8a/rime_jni.so
           fi
-          ls -lh app/src/main/jniLibs/arm64-v8a/rime_jni.so
+          SO=app/src/main/jniLibs/arm64-v8a/rime_jni.so
+          ls -lh "$SO"
+          NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeStart'
+          "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeSetSchema'
+          "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeProcessBackspace'
+          "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeGetInput'
+          "$NM" -D "$SO" | grep 'Java_com_jingwei_aikeyboard_RimeBridge_nativeGetCandidates'
 
-      - name: Commit generated Rime assets and native library
+      - name: Commit generated Rime assets and native library safely
         run: |
+          set -e
+          cp app/src/main/jniLibs/arm64-v8a/rime_jni.so /tmp/rime_jni.so
+          cp app/src/main/assets/rime/jingwei.dict.yaml /tmp/jingwei.dict.yaml
           git config user.name 'Jingwei AI Dev Bot'
           git config user.email 'actions@users.noreply.github.com'
-          git add app/src/main/assets/rime/jingwei.dict.yaml app/src/main/jniLibs/arm64-v8a/rime_jni.so
-          if git diff --cached --quiet; then
-            echo 'Generated files unchanged.'
-            exit 0
-          fi
-          git commit -m 'build(v0.12): bundle Rime dictionary and arm64 engine [skip ci]'
-          git pull --rebase origin dev/v0.12-rime
-          git push origin HEAD:dev/v0.12-rime
+
+          for attempt in 1 2 3; do
+            echo "publish attempt $attempt"
+            git fetch origin dev/v0.12-rime
+            git reset --hard origin/dev/v0.12-rime
+            mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/assets/rime
+            cp /tmp/rime_jni.so app/src/main/jniLibs/arm64-v8a/rime_jni.so
+            cp /tmp/jingwei.dict.yaml app/src/main/assets/rime/jingwei.dict.yaml
+            git add app/src/main/assets/rime/jingwei.dict.yaml app/src/main/jniLibs/arm64-v8a/rime_jni.so
+
+            if git diff --cached --quiet; then
+              echo 'Generated files already match the latest branch.'
+              exit 0
+            fi
+
+            git commit -m 'build(v0.12): bundle verified Rime dictionary and arm64 engine [skip ci]'
+            if git push origin HEAD:dev/v0.12-rime; then
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo 'Failed to publish native library after 3 attempts.' >&2
+          exit 1
