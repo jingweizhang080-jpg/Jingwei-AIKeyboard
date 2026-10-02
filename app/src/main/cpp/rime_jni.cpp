@@ -104,14 +104,9 @@ Java_com_jingwei_aikeyboard_RimeBridge_nativeProcessBackspace(JNIEnv*, jclass) {
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_jingwei_aikeyboard_RimeBridge_nativeGetInput(JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (!g_api || !g_session) return s2j(env, "");
-    RIME_STRUCT(RimeContext, ctx);
-    std::string out;
-    if (g_api->get_context(g_session, &ctx)) {
-        if (ctx.input) out = ctx.input;
-        g_api->free_context(&ctx);
-    }
-    return s2j(env, out);
+    if (!g_api || !g_session || !g_api->get_input) return s2j(env, "");
+    const char* input = g_api->get_input(g_session);
+    return s2j(env, input ? input : "");
 }
 
 extern "C" JNIEXPORT jstring JNICALL
