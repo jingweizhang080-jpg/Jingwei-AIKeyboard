@@ -143,7 +143,7 @@ public class JingweiImeService extends InputMethodService {
                     rimeInputEngine.stop();
                     pinyinBuffer = pending;
                 }
-                if (pinyinStatus != null) pinyinStatus.setText("中");
+                if (pinyinStatus != null) pinyinStatus.setText(pinyinStatusLabel());
                 showPinyinCandidates();
             });
         });
@@ -153,12 +153,12 @@ public class JingweiImeService extends InputMethodService {
             try {
                 pinyinEngine.load();
                 main.post(() -> {
-                    if (pinyinStatus != null) pinyinStatus.setText("中");
+                    if (pinyinStatus != null) pinyinStatus.setText(pinyinStatusLabel());
                     if (!pinyinBuffer.isEmpty()) showPinyinCandidates();
                 });
             } catch (Exception e) {
                 main.post(() -> {
-                    if (pinyinStatus != null) pinyinStatus.setText("中");
+                    if (pinyinStatus != null) pinyinStatus.setText(pinyinStatusLabel());
                     toast("本地拼音词库加载失败，已启用基础词库");
                 });
             }
@@ -1131,7 +1131,7 @@ public class JingweiImeService extends InputMethodService {
             if (composingRow != null) composingRow.setVisibility(View.GONE);
             if (pinyinStatus != null) {
                 pinyinStatus.setVisibility(View.VISIBLE);
-                pinyinStatus.setText(chineseMode ? "中" : "EN");
+                pinyinStatus.setText(pinyinStatusLabel());
             }
             return;
         }
@@ -1333,11 +1333,14 @@ public class JingweiImeService extends InputMethodService {
         if (!pinyinBuffer.isEmpty()) commitBestPinyinCandidateOrRaw();
         chineseMode = !chineseMode;
         if (pinyinStatus != null) {
-            pinyinStatus.setText(chineseMode
-                    ? (pinyinEngine != null && pinyinEngine.isLoaded() ? "中文" : "中文·词库加载中")
-                    : "English");
+            pinyinStatus.setText(pinyinStatusLabel());
         }
         if (pinyinCandidatesBar != null) pinyinCandidatesBar.removeAllViews();
+    }
+
+    private String pinyinStatusLabel() {
+        if (!chineseMode) return "EN";
+        return rimeInputEngine != null && rimeInputEngine.isReady() ? "中·R" : "中";
     }
 
     private void commitPunctuation(String zh, String en) {
